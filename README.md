@@ -51,12 +51,46 @@ scons build/ARM/gem5.debug -j`nproc`
 For more information regarding the binary types, and other build information refer to the gem5 build documentation [here](http://learning.gem5.org/book/part1/building.html).
 
 # Building with docker
-You can use the Dockerfile given in the `docker/` directory to build the project and run the benchmarks. To build the project use the following command:
+
+You can use the Dockerfile in the `docker/` directory to build and run gem5-SALAM in a containerized environment with volume mounting (changes sync between host and container).
+
+## Setup
+
 ```bash
-docker build . --file docker/Dockerfile --build-arg BUILD_TYPE="opt"
+cd docker
+
+# Configure your user ID (run once)
+echo "HOST_UID=$(id -u)" > .env
+echo "HOST_GID=$(id -g)" >> .env
+
+# Build the Docker image
+docker-compose build
 ```
 
-The `BUILD_TYPE` argument sets the the building option for the project and can be `opt` or `debug`.
+## Running
+
+```bash
+cd docker
+docker-compose run --rm gem5-salam
+```
+
+This will start a container with the repository mounted at `/gem5-SALAM`. Any changes made inside the container will be reflected on your host machine, and vice versa.
+
+## Building gem5-SALAM inside the container
+
+Once inside the container, build gem5-SALAM:
+
+```bash
+scons build/ARM/gem5.opt -j$(nproc)
+```
+
+## Running benchmarks inside the container
+
+```bash
+cd $M5_PATH/benchmarks/sys_validation/bfs
+make
+$M5_PATH/tools/run_system.sh --bench bfs --bench-path benchmarks/sys_validation/bfs
+```
 
 # Using gem5-SALAM
 

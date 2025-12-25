@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  gem5-salam:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        HOST_UID: ${HOST_UID:-1000}
+        HOST_GID: ${HOST_GID:-1000}
+    image: gem5-salam
+    container_name: gem5-salam-dev
+    volumes:
+      - ..:/gem5-SALAM
+    environment:
+      - M5_PATH=/gem5-SALAM
+    working_dir: /gem5-SALAM
+    stdin_open: true
+    tty: true
+    command: /bin/bash
+
+# Usage:
+#   cd docker
+#   ./setup-env.sh      # Run once to set your UID/GID in .env file
+#   docker-compose build
+#   docker-compose run --rm gem5-salam
+#
+# Or from project root:
+#   HOST_UID=$(id -u) HOST_GID=$(id -g) docker-compose -f docker/docker-compose.yml build
+#   docker-compose -f docker/docker-compose.yml run --rm gem5-salam

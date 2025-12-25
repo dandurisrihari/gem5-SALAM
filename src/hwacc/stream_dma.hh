@@ -11,6 +11,12 @@
 #include "mem/packet_access.hh"
 //------------------------------------------//
 
+// Security validation support (optional)
+namespace gem5 {
+    class AcceleratorContextManager;
+}
+using gem5::AcceleratorContextManager;
+
 /*
     Steaming DMA device with 2 modes.
     1. Memory to Stream (MM2S)
@@ -149,6 +155,11 @@ class StreamDma : public DmaDevice {
     uint8_t writeIntFrames;
     uint64_t writePtr;
 
+    // Security validation (optional)
+    AcceleratorContextManager *securityContext;
+    bool enableSecurityValidation;
+    uint64_t currentPid;  // Process ID for security context
+
   protected:
 
   public:
@@ -183,6 +194,24 @@ class StreamDma : public DmaDevice {
 
     Port &getPort(const std::string &if_name,
             PortID idx=InvalidPortID) override;
+
+    // Security validation interface
+    void setSecurityContext(AcceleratorContextManager *ctx) {
+        securityContext = ctx;
+        enableSecurityValidation = (ctx != nullptr);
+    }
+    void setProcessId(uint64_t pid) { currentPid = pid; }
+    uint64_t getProcessId() const { return currentPid; }
+
+  private:
+    /**
+     * Validate DMA address range for security
+     * @param addr Start address
+     * @param len Length in bytes
+     * @param isWrite true if write operation
+     * @return true if access is allowed
+     */
+    bool validateDmaAccess(Addr addr, size_t len, bool isWrite);
 };
 
 #endif //__HWACC_STREAM_DMA_HH__

@@ -9,6 +9,12 @@
 #include "mem/packet_access.hh"
 #include "params/NoncoherentDma.hh"
 
+// Security validation support (optional)
+namespace gem5 {
+    class AcceleratorContextManager;
+}
+using gem5::AcceleratorContextManager;
+
 //------------------------------------------
 //    Memory Map
 //    |  Length  | Dst Addr | Src Addr | Flags  |
@@ -35,6 +41,11 @@ class NoncoherentDma : public DmaDevice
     BaseGic * gic;
     uint32_t intNum;
     int clock_period;
+
+    // Security validation (optional)
+    AcceleratorContextManager *securityContext;
+    bool enableSecurityValidation;
+    uint64_t currentPid;  // Process ID for security context
 
     uint8_t * mmreg;
     uint8_t * FLAGS;
@@ -71,6 +82,24 @@ class NoncoherentDma : public DmaDevice
 
     Port &getPort(const std::string &if_name,
                   PortID idx=InvalidPortID) override;
+
+    // Security validation interface
+    void setSecurityContext(AcceleratorContextManager *ctx) {
+        securityContext = ctx;
+        enableSecurityValidation = (ctx != nullptr);
+    }
+    void setProcessId(uint64_t pid) { currentPid = pid; }
+    uint64_t getProcessId() const { return currentPid; }
+
+  private:
+    /**
+     * Validate DMA address range for security
+     * @param addr Start address
+     * @param len Length in bytes
+     * @param isWrite true if write operation
+     * @return true if access is allowed
+     */
+    bool validateDmaAccess(Addr addr, size_t len, bool isWrite);
 };
 
 #endif //_HWACC_NONCOHERENT_DMA_HH__

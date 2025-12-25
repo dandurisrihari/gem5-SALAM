@@ -32,6 +32,7 @@
 
 #include "arch/generic/mmu.hh"
 #include "debug/Vma.hh"
+#include "hwacc/accel_mmu_notifier.hh"
 #include "mem/se_translating_port_proxy.hh"
 #include "sim/process.hh"
 #include "sim/syscall_debug_macros.hh"
@@ -263,6 +264,13 @@ MemState::unmapRegion(Addr start_addr, Addr length)
     for (auto *tc: _ownerProcess->system->threads) {
         tc->getMMUPtr()->flushAll();
     }
+
+    /**
+     * Notify accelerator page tables of address invalidation (mmu_notifier).
+     * This allows accelerator DMA validation to stay in sync with CPU
+     * address space changes.
+     */
+    notifyAcceleratorInvalidate(_ownerProcess->pid(), start_addr, end_addr);
 
     do {
         if (!_ownerProcess->pTable->isUnmapped(start_addr, _pageBytes))

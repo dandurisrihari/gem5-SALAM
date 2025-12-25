@@ -388,6 +388,17 @@ elif main['CLANG']:
     with gem5_scons.Configure(main) as conf:
         conf.CheckCxxFlag('-Wno-c99-designator')
         conf.CheckCxxFlag('-Wno-defaulted-function-deleted')
+        # Disable warning about non-virtual destructor in classes with
+        # virtual functions (common in SALAM codebase)
+        conf.CheckCxxFlag('-Wno-delete-non-abstract-non-virtual-dtor')
+        conf.CheckCxxFlag('-Wno-delete-non-virtual-dtor')
+
+    # Also add unconditionally in case CheckCxxFlag doesn't add it properly
+    # and make sure they're not treated as errors
+    main.Append(CXXFLAGS=['-Wno-delete-non-abstract-non-virtual-dtor',
+                          '-Wno-delete-non-virtual-dtor',
+                          '-Wno-error=delete-non-abstract-non-virtual-dtor',
+                          '-Wno-error=delete-non-virtual-dtor'])
 
     main.Append(TCMALLOC_CCFLAGS=['-fno-builtin'])
 
@@ -479,7 +490,7 @@ if main['USE_PYTHON']:
         if conf.TryAction('@%s --embed' % python_config)[0]:
             cmd.append('--embed')
 
-    def flag_filter(env, cmd_output):
+    def flag_filter(env, cmd_output, unique=True):
         flags = cmd_output.split()
         prefixes = ('-l', '-L', '-I')
         is_useful = lambda x: any(x.startswith(prefix) for prefix in prefixes)

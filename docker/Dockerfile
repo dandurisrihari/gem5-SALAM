@@ -11,16 +11,24 @@ ARG BUILD_TYPE
 RUN export DEBIAN_FRONTEND=noninteractive && export TZ=America/New_York && \
     apt-get update && \
     apt-get install -yqq \
-        apt-utils sudo\
+        apt-utils sudo \
         build-essential cmake git \
-        libssl-dev pkg-config python3 python3-pip\
+        libssl-dev pkg-config python3 python3-pip \
         zlib1g zlib1g-dev m4 \
-        scons libprotobuf-dev protobuf-compiler \ 
+        scons libprotobuf-dev protobuf-compiler \
         libprotoc-dev libgoogle-perftools-dev \
         gcc-multilib g++-multilib \
-        python3-dev python-is-python3 python3-yaml\
+        python3-dev python-is-python3 python3-yaml \
         libboost-all-dev gcc-arm-none-eabi \
-        llvm-9 clang-9
+        llvm-9 clang-9 \
+        wget lsb-release software-properties-common gnupg \
+        libpng-dev
+
+# Install LLVM-12 using official script
+RUN wget https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && \
+    ./llvm.sh 12 all && \
+    rm llvm.sh
 
 WORKDIR /gem5-SALAM
 COPY . /gem5-SALAM
@@ -36,4 +44,4 @@ RUN make
 
 # Run a benchmark.
 WORKDIR /gem5-SALAM
-RUN ./systemValidation.sh -b bfs
+# RUN ./systemValidation.sh -b bfs

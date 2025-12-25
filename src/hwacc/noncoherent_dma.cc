@@ -1,6 +1,6 @@
-//------------------------------------------//
 #include "hwacc/noncoherent_dma.hh"
-//------------------------------------------//
+
+#include "hwacc/accelerator_context.hh"
 
 NoncoherentDma::NoncoherentDma(const NoncoherentDmaParams &p)
     : DmaDevice(p),
@@ -14,12 +14,19 @@ NoncoherentDma::NoncoherentDma(const NoncoherentDmaParams &p)
     gic(p.gic),
     intNum(p.int_num),
     clock_period(p.clock_period),
+    securityContext(nullptr),
+    enableSecurityValidation(false),
+    currentPid(0),
     tickEvent([this]{tick();}, name()),
     accPort(this, sys, p.sid, p.ssid) {
-    memSideReadFifo = new DmaReadFifo(dmaPort, size_t(bufferSize/2), maxReqSize, maxPending);
-    memSideWriteFifo = new DmaWriteFifo(dmaPort, size_t(bufferSize/2), maxReqSize, maxPending);
-    accSideReadFifo = new DmaReadFifo(accPort, size_t(bufferSize/2), maxReqSize, maxPending);
-    accSideWriteFifo = new DmaWriteFifo(accPort, size_t(bufferSize/2), maxReqSize, maxPending);
+    memSideReadFifo = new DmaReadFifo(
+        dmaPort, size_t(bufferSize/2), maxReqSize, maxPending);
+    memSideWriteFifo = new DmaWriteFifo(
+        dmaPort, size_t(bufferSize/2), maxReqSize, maxPending);
+    accSideReadFifo = new DmaReadFifo(
+        accPort, size_t(bufferSize/2), maxReqSize, maxPending);
+    accSideWriteFifo = new DmaWriteFifo(
+        accPort, size_t(bufferSize/2), maxReqSize, maxPending);
     readFifo = nullptr;
     writeFifo = nullptr;
     mmreg = new uint8_t[pioSize];
@@ -74,7 +81,21 @@ NoncoherentDma::tick() {
         activeSrc = *SRC;
         activeDst = *DST;
         writesLeft = *LEN;
-        DPRINTF(NoncoherentDma, "SRC:0x%016x, DST:0x%016x, LEN:%d\n", activeSrc, activeDst, writesLeft);
+        DPRINTF(NoncoherentDma, "SRC:0x%016x, DST:0x%016x, LEN:%d\n",
+                activeSrc, activeDst, writesLeft);
+
+        // Security validation: check both source and destination addresses
+        if (enableSecurityValidation) {
+            bool srcValid = validateDmaAccess(activeSrc, writesLeft, false);
+            bool dstValid = validateDmaAccess(activeDst, writesLeft, true);
+            if (!srcValid || !dstValid) {
+                // Log violation but continue (no fault, just logging)
+                DPRINTF(NoncoherentDma, "SECURITY: DMA validation failed - "
+                        "src_valid=%d, dst_valid=%d, pid=%llu\n",
+                        srcValid, dstValid, currentPid);
+            }
+        }
+
         start_time = curTick();
         readFifo = getActiveReadFifo();
         writeFifo = getActiveWriteFifo();
@@ -104,7 +125,8 @@ NoncoherentDma::tick() {
                 //raise interrupts
                 gic->sendInt(intNum);
                 double xfer_time = (double)(curTick() - start_time) * (1e-6);
-                DPRINTF(NoncoherentDma, "Transfer completed in %f us\n", xfer_time);
+                DPRINTF(NoncoherentDma,
+                        "Transfer completed in %f us\n", xfer_time);
             }
         }
     }
@@ -116,7 +138,8 @@ NoncoherentDma::tick() {
 
 Tick
 NoncoherentDma::read(PacketPtr pkt) {
-    DPRINTF(DeviceMMR, "The address range associated with this DMA was read!\n");
+    DPRINTF(DeviceMMR,
+            "The address range associated with this DMA was read!\n");
 
     Addr offset = pkt->req->getPaddr() - pioAddr;
 
@@ -171,6 +194,34 @@ NoncoherentDma::getPort(const std::string &if_name, PortID idx)
         return accPort;
     }
     return DmaDevice::getPort(if_name, idx);
+}
+
+bool
+NoncoherentDma::validateDmaAccess(Addr addr, size_t len, bool isWrite)
+{
+    if (!enableSecurityValidation || !securityContext) {
+        return true;  // No validation configured
+    }
+
+    // Switch to current process context if needed
+    securityContext->switchContext(currentPid);
+
+    // Validate each page in the DMA range
+    const size_t pageSize = 4096;
+    Addr pageAddr = addr & ~(pageSize - 1);
+    Addr endAddr = addr + len;
+    bool allValid = true;
+
+    while (pageAddr < endAddr) {
+        if (!securityContext->validateAccess(pageAddr, isWrite)) {
+            DPRINTF(NoncoherentDma, "SECURITY: Page 0x%lx validation failed "
+                    "(isWrite=%d, pid=%llu)\n", pageAddr, isWrite, currentPid);
+            allValid = false;
+        }
+        pageAddr += pageSize;
+    }
+
+    return allValid;
 }
 
 // NoncoherentDma *

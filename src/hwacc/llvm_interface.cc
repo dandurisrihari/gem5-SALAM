@@ -624,13 +624,19 @@ LLVMInterface::ActiveFunction::launchRead(
                         "|| Cache HIT for READ: addr=0x%016lx - proceeding\n",
                         ptrAddr);
                 // Fall through to launch the read normally
-            } else {
-                // Cache miss - need validation
-                // Check if validation is already pending for this instruction
-                if (owner->isValidationPending(readInst->getUID())) {
-                    // Validation already in progress
-                    return false;
+            } else if (owner->isPageValidationPending(ptrAddr)) {
+                // Page validation already in progress - wait for it
+                if (!owner->isValidationPending(readInst->getUID())) {
+                    owner->queueWaitingInstruction(
+                        ptrAddr, readInst, this, true, reqSize);
+                    if (dbg)
+                        DPRINTFS(RuntimeCompute, owner,
+                            "|| Queuing READ for pending page validation: "
+                            "addr=0x%016lx\n", ptrAddr);
                 }
+                return false;
+            } else {
+                // Cache miss - need validation, send request
                 if (dbg)
                     DPRINTFS(RuntimeCompute, owner,
                         "|| Sending kernel validation for READ: "
@@ -680,13 +686,19 @@ LLVMInterface::ActiveFunction::launchWrite(
                     "|| Cache HIT for WRITE: addr=0x%016lx - proceeding\n",
                     ptrAddr);
             // Fall through to launch the write normally
-        } else {
-            // Cache miss - need validation
-            // Check if validation is already pending for this instruction
-            if (owner->isValidationPending(writeInst->getUID())) {
-                // Validation already in progress
-                return false;
+        } else if (owner->isPageValidationPending(ptrAddr)) {
+            // Page validation already in progress - wait for it
+            if (!owner->isValidationPending(writeInst->getUID())) {
+                owner->queueWaitingInstruction(
+                    ptrAddr, writeInst, this, false, reqSize);
+                if (dbg)
+                    DPRINTFS(RuntimeCompute, owner,
+                        "|| Queuing WRITE for pending page validation: "
+                        "addr=0x%016lx\n", ptrAddr);
             }
+            return false;
+        } else {
+            // Cache miss - need validation, send request
             if (dbg)
                 DPRINTFS(RuntimeCompute, owner,
                     "|| Sending kernel validation for WRITE: "
@@ -1200,6 +1212,22 @@ LLVMInterface::createInstruction(llvm::Instruction * inst, uint64_t id) {
 // Models AIA consulting KD for SMID validation
 
 void
+LLVMInterface::queueWaitingInstruction(uint64_t addr,
+    std::shared_ptr<SALAM::Instruction> inst,
+    ActiveFunction* func, bool isRead, size_t size)
+{
+    uint64_t pageAddr = addr & ~0xFFFULL;
+    WaitingInstruction waiting;
+    waiting.inst = inst;
+    waiting.func = func;
+    waiting.isRead = isRead;
+    waiting.addr = addr;
+    waiting.size = size;
+    waitingForPage[pageAddr].push_back(waiting);
+    pendingValidationUIDs.insert(inst->getUID());
+}
+
+void
 LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
                                      std::shared_ptr<SALAM::Instruction> inst,
                                      ActiveFunction* func)
@@ -1207,6 +1235,9 @@ LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
     // Cache miss - need to validate (incurs latency)
     // Cache check is done in launchRead/launchWrite before calling this
     uint64_t pageAddr = addr & ~0xFFFULL;
+
+    // Mark this page as having a pending validation
+    pendingValidationPages.insert(pageAddr);
 
     // Create pending validation request
     PendingValidationRequest req;
@@ -1220,8 +1251,8 @@ LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
     req.requestId = nextValidationRequestId++;
 
     DPRINTF(LLVMInterface,
-            "[AIA->KD] Validation req #%llu: %s addr=0x%016lx (page 0x%016lx), "
-            "size=%lu, pid=%llu, uid=%llu\n",
+            "[AIA->KD] Validation req #%llu: %s addr=0x%016lx "
+            "(page 0x%016lx), size=%lu, pid=%llu, uid=%llu\n",
             req.requestId, isRead ? "READ" : "WRITE", addr, pageAddr,
             (unsigned long)size, processId, inst->getUID());
 
@@ -1275,6 +1306,9 @@ LLVMInterface::processValidationResponse()
         uint64_t pageAddr = req.addr & ~0xFFFULL;
         validatedPagesPerProcess[req.pid].insert(pageAddr);
 
+        // Remove from pending validation pages
+        pendingValidationPages.erase(pageAddr);
+
         Tick validationTime = currentTick - req.requestTime;
         totalKernelValidationLatency += validationTime;
 
@@ -1298,7 +1332,7 @@ LLVMInterface::processValidationResponse()
         }
 
         if (validationOK) {
-            // Proceed with the memory access
+            // Proceed with the original request
             if (req.isRead) {
                 auto memReq = req.inst->createMemoryRequest();
                 auto rd_uid = req.inst->getUID();
@@ -1318,6 +1352,39 @@ LLVMInterface::processValidationResponse()
                 DPRINTF(LLVMInterface,
                         "[AIA] Proceeding with WRITE at 0x%016lx\n",
                         req.addr);
+            }
+
+            // Process any instructions waiting for this page validation
+            auto waitIt = waitingForPage.find(pageAddr);
+            if (waitIt != waitingForPage.end()) {
+                for (auto& waiting : waitIt->second) {
+                    pendingValidationUIDs.erase(waiting.inst->getUID());
+                    waiting.func->removeFromReservation(waiting.inst->getUID());
+                    validationCacheHits++;  // Count as cache hit (shared)
+
+                    DPRINTF(LLVMInterface,
+                            "[AIA] Processing waiting %s at 0x%016lx\n",
+                            waiting.isRead ? "READ" : "WRITE",
+                            waiting.addr);
+
+                    if (waiting.isRead) {
+                        auto memReq = waiting.inst->createMemoryRequest();
+                        auto rd_uid = waiting.inst->getUID();
+                        waiting.func->readQueue.insert({rd_uid, waiting.inst});
+                        waiting.func->readQueueMap.insert({memReq, rd_uid});
+                        launchRead(memReq, waiting.func);
+                    } else {
+                        auto memReq = waiting.inst->createMemoryRequest();
+                        waiting.func->trackWrite(
+                            memReq->getAddress(), waiting.inst);
+                        auto wr_uid = waiting.inst->getUID();
+                        waiting.func->writeQueue.insert(
+                            {wr_uid, waiting.inst});
+                        waiting.func->writeQueueMap.insert({memReq, wr_uid});
+                        launchWrite(memReq, waiting.func);
+                    }
+                }
+                waitingForPage.erase(waitIt);
             }
         } else {
             // Access denied by kernel

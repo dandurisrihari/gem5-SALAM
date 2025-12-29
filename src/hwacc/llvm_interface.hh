@@ -87,6 +87,20 @@ class LLVMInterface : public ComputeUnit {
     uint64_t nextValidationRequestId;
     std::set<uint64_t> pendingValidationUIDs;
 
+    // Track pages with in-flight validations to avoid duplicate requests
+    std::set<uint64_t> pendingValidationPages;
+
+    // Instructions waiting for a page validation to complete
+    // Key: page address, Value: list of (inst, func, isRead) waiting
+    struct WaitingInstruction {
+        std::shared_ptr<SALAM::Instruction> inst;
+        ActiveFunction* func;
+        bool isRead;
+        uint64_t addr;
+        size_t size;
+    };
+    std::map<uint64_t, std::list<WaitingInstruction>> waitingForPage;
+
     // Validation statistics
     uint64_t totalKernelValidations;
     Tick totalKernelValidationLatency;
@@ -265,6 +279,10 @@ class LLVMInterface : public ComputeUnit {
     bool isValidationPending(uint64_t uid) {
         return pendingValidationUIDs.count(uid) > 0;
     }
+    bool isPageValidationPending(uint64_t addr) {
+        uint64_t pageAddr = addr & ~0xFFFULL;
+        return pendingValidationPages.count(pageAddr) > 0;
+    }
     bool isPageValidated(uint64_t addr) {
         uint64_t pageAddr = addr & ~0xFFFULL;
         auto it = validatedPagesPerProcess.find(processId);
@@ -274,6 +292,10 @@ class LLVMInterface : public ComputeUnit {
         return false;
     }
     void incrementValidationCacheHits() { validationCacheHits++; }
+    void queueWaitingInstruction(uint64_t addr,
+                                 std::shared_ptr<SALAM::Instruction> inst,
+                                 ActiveFunction* func, bool isRead,
+                                 size_t size);
     void sendValidationRequest(uint64_t addr, size_t size, bool isRead,
                                std::shared_ptr<SALAM::Instruction> inst,
                                ActiveFunction* func);

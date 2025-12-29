@@ -38,25 +38,39 @@ def AccConfig(acc, bench_file, config_file):
         for yaml_inst_list in yaml.safe_load_all(fu_yaml):
             document = yaml_inst_list['hw_config']
             current_acc = yaml_inst_list['hw_config']['name'] + '_' + benchname
-            if (benchPath[9] == current_acc):
+            # Get accelerator folder name from path
+            acc_folder = ""
+            if len(benchPath) > m5PathLen+4:
+                acc_folder = benchPath[m5PathLen+4]
+            expected_acc = acc_folder + '_' + benchname
+            if (expected_acc == current_acc):
                 print(current_acc + " Profile Loaded")
-                # print(yaml_inst_list['hw_config'][benchname])
-                inst_list = yaml_inst_list['hw_config'][current_acc]['instructions'].keys(
-                )
+                # Find correct key in yaml
+                yaml_key = None
+                for key in yaml_inst_list['hw_config'].keys():
+                    if key.lower() == current_acc.lower():
+                        yaml_key = key
+                        break
+                if yaml_key is None:
+                    yaml_key = current_acc
+                hw_cfg = yaml_inst_list['hw_config'][yaml_key]
+                inst_list = hw_cfg['instructions'].keys()
                 for instruction in inst_list:
-                    setattr(acc.hw_interface.cycle_counts, instruction,
-                            yaml_inst_list['hw_config'][current_acc]['instructions'][instruction]['runtime_cycles'])
+                    cyc = hw_cfg['instructions'][instruction]
+                    setattr(acc.hw_interface.cycle_counts,
+                            instruction, cyc['runtime_cycles'])
         fu_yaml.close()
 
     else:
         fu_yaml = open(config_file, 'r')
         yaml_inst_list = yaml.safe_load(fu_yaml)
         if yaml_inst_list['hw_config'][benchname] is not None:
-            inst_list = yaml_inst_list['hw_config'][benchname]['instructions'].keys(
-            )
+            hw_cfg = yaml_inst_list['hw_config'][benchname]
+            inst_list = hw_cfg['instructions'].keys()
             for instruction in inst_list:
-                setattr(acc.hw_interface.cycle_counts, instruction,
-                        yaml_inst_list['hw_config'][benchname]['instructions'][instruction]['runtime_cycles'])
+                cyc = hw_cfg['instructions'][instruction]
+                setattr(acc.hw_interface.cycle_counts,
+                        instruction, cyc['runtime_cycles'])
         fu_yaml.close()
 
     # TODO Automate the generation of the list below

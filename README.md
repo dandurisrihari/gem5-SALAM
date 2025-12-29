@@ -205,7 +205,7 @@ Example trace output:
 
 # Parallel Experiment Runner
 
-The `run_parallel.sh` script allows running multiple experiments with different validation latencies in parallel.
+The `run_parallel.sh` script allows running multiple experiments with different validation latencies in parallel. It can automatically build benchmarks and run experiments across all available benchmarks.
 
 ## Usage
 
@@ -222,20 +222,50 @@ The `run_parallel.sh` script allows running multiple experiments with different 
 | `--config-name` | 1_config.yml | Accelerator config file |
 | `--latencies` | 0,10000,50000,100000 | Comma-separated validation latencies |
 | `--parallel`, `-j` | 4 | Number of parallel jobs |
+| `--all`, `-a` | disabled | Run all available benchmarks |
+| `--list` | - | List all available benchmarks |
 | `--trace`, `-t` | disabled | Enable debug tracing |
 | `--trace-flags` | LLVMInterface | Debug trace flags |
 | `--dry-run` | disabled | Print commands without executing |
 
+## Available Benchmarks
+
+Run `./tools/run_parallel.sh --list` to see all available benchmarks:
+
+| Benchmark | Path | Description |
+|-----------|------|-------------|
+| mobilenetv2 | benchmarks/mobilenetv2 | MobileNetV2 neural network |
+| bfs | benchmarks/sys_validation/bfs | Breadth-first search |
+| fft | benchmarks/sys_validation/fft | Fast Fourier transform |
+| gemm | benchmarks/sys_validation/gemm | General matrix multiply |
+| md_grid | benchmarks/sys_validation/md_grid | Molecular dynamics (grid) |
+| md_knn | benchmarks/sys_validation/md_knn | Molecular dynamics (KNN) |
+| nw | benchmarks/sys_validation/nw | Needleman-Wunsch alignment |
+| spmv | benchmarks/sys_validation/spmv | Sparse matrix-vector multiply |
+| stencil2d | benchmarks/sys_validation/stencil2d | 2D stencil computation |
+| stencil3d | benchmarks/sys_validation/stencil3d | 3D stencil computation |
+| mergesort | benchmarks/sys_validation/mergesort | Merge sort |
+
 ## Examples
 
-**Run experiments with multiple latencies:**
+**Run MobileNetV2 with multiple latencies:**
 ```bash
-./tools/run_parallel.sh --latencies 0,5000,10000,25000,50000 --parallel 3
+./tools/run_parallel.sh --bench mobilenetv2 --latencies 0,5000,10000,25000,50000 --parallel 3
 ```
 
-**Dry run to see commands:**
+**Run all benchmarks with validation experiments:**
+```bash
+./tools/run_parallel.sh --all --latencies 0,10000,50000 --parallel 4
+```
+
+**Dry run to see commands (MobileNetV2 only):**
 ```bash
 ./tools/run_parallel.sh --latencies 0,10000 --dry-run
+```
+
+**Dry run for all benchmarks:**
+```bash
+./tools/run_parallel.sh --all --latencies 0,10000 --dry-run
 ```
 
 **Run with tracing enabled:**
@@ -243,12 +273,42 @@ The `run_parallel.sh` script allows running multiple experiments with different 
 ./tools/run_parallel.sh --latencies 10000 --trace
 ```
 
+**Run specific benchmark:**
+```bash
+./tools/run_parallel.sh --bench gemm --bench-path benchmarks/sys_validation/gemm --latencies 0,10000
+```
+
+## Automatic Building
+
+The script automatically builds benchmarks if the kernel (`main.elf`) is not found:
+
+```
+[BUILD] Kernel not found for fft, building...
+[BUILD] Successfully built fft
+```
+
 ## Output
 
-Results are saved to `BM_ARM_OUT/<benchmark>_experiments_<timestamp>/`:
-- `baseline_no_validation/` - Results without validation
-- `latency_<N>/` - Results with validation latency N
-- `summary.csv` - Summary of all experiments
+Results are saved to `BM_ARM_OUT/<benchmark>_experiments_<timestamp>/` for single benchmark runs, or `BM_ARM_OUT/all_benchmarks_<timestamp>/` for `--all` runs:
+
+```
+BM_ARM_OUT/
+├── mobilenetv2_experiments_20251229_123456/
+│   ├── baseline_no_validation/
+│   │   ├── stats.txt
+│   │   └── run.log
+│   ├── latency_10000/
+│   │   ├── stats.txt
+│   │   └── run.log
+│   └── summary.csv
+└── all_benchmarks_20251229_234567/
+    ├── bfs/
+    │   ├── baseline_no_validation/
+    │   └── latency_10000/
+    ├── gemm/
+    ├── mobilenetv2/
+    └── summary.csv
+```
 
 # Resources
 

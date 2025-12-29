@@ -7,7 +7,7 @@ import yaml
 import os
 
 
-def AccConfig(acc, bench_file, config_file, enable_kernel_validation=True,
+def AccConfig(acc, bench_file, config_file, enable_kernel_validation=False,
               kernel_validation_latency=0, validation_int_num=172,
               process_id=17):
     # Initialize LLVMInterface Objects

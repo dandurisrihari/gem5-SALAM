@@ -321,7 +321,16 @@ class Accelerator:
             lines.append("clstr." + self.name + " = CommInterface(devicename=acc, gic=gic, pio_addr="
                          + str(hex(self.address)) + ", pio_size=" + str(self.size) + ")")
 
-        lines.append("AccConfig(clstr." + self.name + ", ir, hw_config)")
+        # Pass kernel validation options from args/options
+        lines.append("AccConfig(clstr." + self.name + ", ir, hw_config,")
+        lines.append("          enable_kernel_validation="
+                     "getattr(options, 'enable_kernel_validation', False),")
+        lines.append("          kernel_validation_latency="
+                     "getattr(options, 'kernel_validation_latency', 0),")
+        lines.append("          validation_int_num="
+                     "getattr(options, 'validation_int_num', 172),")
+        lines.append("          process_id="
+                     "getattr(options, 'process_id', 17))")
         lines.append("")
 
         return lines

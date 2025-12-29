@@ -14,7 +14,7 @@ class LLVMInterface(ComputeUnit):
     top_name = Param.String("top", "Top-level function name")
 
     # Kernel validation parameters (AIA-KD SMID verification)
-    enable_kernel_validation = Param.Bool(True, "Enable kernel validation")
+    enable_kernel_validation = Param.Bool(False, "Enable kernel validation")
     validation_int_num = Param.Int32(172, "Interrupt number for validation")
     kernel_validation_latency = Param.Tick(0, "Kernel validation latency")
     process_id = Param.UInt64(17, "Process ID for SMID validation")

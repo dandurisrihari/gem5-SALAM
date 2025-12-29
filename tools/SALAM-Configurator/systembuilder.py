@@ -318,8 +318,8 @@ def main():
                     config_path + "fs_" + file_name + ".py")
     f = open(config_path + "fs_" + file_name + ".py", "r")
     fullSystem = f.readlines()
-    fullSystem[65] = "import " + file_name
-    fullSystem[229] = "        " + file_name + ".makeHWAcc(args, test_sys)\n"
+    fullSystem[65] = "import " + file_name + "\n"
+    fullSystem[240] = "        " + file_name + ".makeHWAcc(args, test_sys)\n"
     f = open(config_path + "fs_" + file_name + ".py", "w")
     f.writelines(fullSystem)
     # Warn if the size is greater than allowed

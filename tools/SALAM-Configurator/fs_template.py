@@ -72,6 +72,17 @@ def addHWAccOptions(parser):
                       help="""Path to folders containing accelerator benchmarks""", default="")
     parser.add_argument("--accbench", action="store", type=str,
                       help="""Name of benchmark to accelerate""", default="")
+    # Kernel validation options for AIA-KD SMID verification
+    parser.add_argument("--enable-kernel-validation", action="store_true",
+                      default=False,
+                      help="""Enable kernel validation for memory accesses""")
+    parser.add_argument("--kernel-validation-latency", action="store",
+                      type=int, default=0,
+                      help="""Latency (ticks) for kernel validation""")
+    parser.add_argument("--validation-int-num", action="store", type=int,
+                      default=172, help="""Interrupt number for validation""")
+    parser.add_argument("--process-id", action="store", type=int, default=17,
+                      help="""Process ID for SMID validation""")
 
 def cmd_line_template():
     if args.command_line and args.command_line_file:

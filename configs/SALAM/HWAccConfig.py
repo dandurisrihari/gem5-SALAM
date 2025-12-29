@@ -7,9 +7,22 @@ import yaml
 import os
 
 
-def AccConfig(acc, bench_file, config_file):
+def AccConfig(acc, bench_file, config_file, enable_kernel_validation=True,
+              kernel_validation_latency=0, validation_int_num=172,
+              process_id=17):
     # Initialize LLVMInterface Objects
     acc.llvm_interface = LLVMInterface()
+
+    # Kernel validation configuration
+    acc.llvm_interface.enable_kernel_validation = enable_kernel_validation
+    acc.llvm_interface.kernel_validation_latency = kernel_validation_latency
+    acc.llvm_interface.validation_int_num = validation_int_num
+    acc.llvm_interface.process_id = process_id
+
+    if enable_kernel_validation:
+        print("[HWAccConfig] Kernel validation ENABLED: "
+              "latency=%d, int=%d, pid=%d" %
+              (kernel_validation_latency, validation_int_num, process_id))
 
     # Benchmark path
     acc.llvm_interface.in_file = bench_file

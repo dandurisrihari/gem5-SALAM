@@ -14,6 +14,7 @@
 #include <memory>
 #include <queue>
 #include <ratio>
+#include <set>
 #include <type_traits>
 #include <typeinfo>
 
@@ -54,6 +55,46 @@ class LLVMInterface : public ComputeUnit {
     bool compOpScheduled;
     bool lockstep;
     bool dbg;
+
+    // Kernel validation infrastructure
+    // Models AIA consulting KD for SMID validation
+    // to prevent confused deputy attacks
+
+    // Forward declaration of nested class
+    class ActiveFunction;
+
+    // Pending validation request
+    struct PendingValidationRequest
+    {
+        uint64_t addr;
+        size_t size;
+        bool isRead;
+        std::shared_ptr<SALAM::Instruction> inst;
+        ActiveFunction* func;
+        Tick requestTime;
+        uint64_t pid;
+        uint64_t requestId;
+    };
+
+    // Kernel validation settings
+    bool enableKernelValidation;
+    int32_t validationIntNum;
+    Tick kernelValidationLatency;
+    uint64_t processId;
+
+    // Pending validation tracking
+    std::list<PendingValidationRequest> pendingValidations;
+    uint64_t nextValidationRequestId;
+    std::set<uint64_t> pendingValidationUIDs;
+
+    // Validation statistics
+    uint64_t totalKernelValidations;
+    Tick totalKernelValidationLatency;
+    uint64_t kernelValidationDenied;
+
+    // Validation response event
+    EventFunctionWrapper validationResponseEvent;
+
     std::chrono::duration<float> setupTime;
     std::chrono::duration<float> simTotal;
     std::chrono::duration<float> simTime;
@@ -128,6 +169,16 @@ class LLVMInterface : public ComputeUnit {
         inline bool computeUIDActive(uint64_t uid) {
           return (computeQueue.find(uid) != computeQueue.end());
         }
+        // Remove instruction from reservation queue by UID
+        inline bool removeFromReservation(uint64_t uid) {
+          for (auto it = reservation.begin(); it != reservation.end(); ++it) {
+            if ((*it)->getUID() == uid) {
+              reservation.erase(it);
+              return true;
+            }
+          }
+          return false;
+        }
     public:
         ActiveFunction(LLVMInterface * _owner, std::shared_ptr<SALAM::Function> _func,
                        std::shared_ptr<SALAM::Instruction> _caller):
@@ -152,8 +203,8 @@ class LLVMInterface : public ComputeUnit {
         inline bool canReturn() {
             return queuesClear() && reservation.front()->isReturn();
         }
-        void launchRead(std::shared_ptr<SALAM::Instruction> readInst);
-        void launchWrite(std::shared_ptr<SALAM::Instruction> writeInst);
+        bool launchRead(std::shared_ptr<SALAM::Instruction> readInst);
+        bool launchWrite(std::shared_ptr<SALAM::Instruction> writeInst);
         bool hasReturned() { return returned; }
     };
 
@@ -191,10 +242,30 @@ class LLVMInterface : public ComputeUnit {
                                                           uint64_t id);
     void dumpQueues();
     uint32_t getSchedulingThreshold() { return scheduling_threshold; }
-    void addSchedulingTime(std::chrono::duration<float> timeDelta) { schedulingTime = schedulingTime + timeDelta; }
-    void addQueueTime(std::chrono::duration<float> timeDelta) { queueProcessTime = queueProcessTime + timeDelta; }
-    void addComputeTime(std::chrono::duration<float> timeDelta) { computeTime = computeTime + timeDelta; }
-    void addHWTime(std::chrono::duration<float> timeDelta) { hwTime = hwTime + timeDelta; }
+    void addSchedulingTime(std::chrono::duration<float> timeDelta) {
+        schedulingTime = schedulingTime + timeDelta;
+    }
+    void addQueueTime(std::chrono::duration<float> timeDelta) {
+        queueProcessTime = queueProcessTime + timeDelta;
+    }
+    void addComputeTime(std::chrono::duration<float> timeDelta) {
+        computeTime = computeTime + timeDelta;
+    }
+    void addHWTime(std::chrono::duration<float> timeDelta) {
+        hwTime = hwTime + timeDelta;
+    }
+
+    // Kernel validation functions
+    bool isKernelValidationEnabled() { return enableKernelValidation; }
+    bool isValidationPending(uint64_t uid) {
+        return pendingValidationUIDs.count(uid) > 0;
+    }
+    void sendValidationRequest(uint64_t addr, size_t size, bool isRead,
+                               std::shared_ptr<SALAM::Instruction> inst,
+                               ActiveFunction* func);
+    void processValidationResponse();
+    bool validateWithKernel(uint64_t addr, size_t size, uint64_t pid);
+    void printKernelValidationStats();
 };
 
 #endif //__HWACC_LLVM_INTERFACE_HH__

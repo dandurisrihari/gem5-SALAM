@@ -7,10 +7,28 @@ LLVMInterface::LLVMInterface(const LLVMInterfaceParams &p):
     topName(p.top_name),
     scheduling_threshold(p.sched_threshold),
     clock_period(p.clock_period),
-    lockstep(p.lockstep_mode) {
-    // if (DTRACE(Trace)) DPRINTF(Runtime, "Trace: %s \n", __PRETTY_FUNCTION__);
+    lockstep(p.lockstep_mode),
+    // Kernel validation initialization (AIA-KD SMID verification)
+    enableKernelValidation(p.enable_kernel_validation),
+    validationIntNum(p.validation_int_num),
+    kernelValidationLatency(p.kernel_validation_latency),
+    processId(p.process_id),
+    nextValidationRequestId(0),
+    totalKernelValidations(0),
+    totalKernelValidationLatency(0),
+    kernelValidationDenied(0),
+    validationResponseEvent(
+        [this]{ processValidationResponse(); }, name())
+{
     clock_period = clock_period * 1000;
     dbg = comm->debug();
+
+    // Log kernel validation configuration
+    if (enableKernelValidation) {
+        DPRINTF(LLVMInterface,
+                "Kernel validation ENABLED: int=%d, lat=%llu, pid=%llu\n",
+                validationIntNum, kernelValidationLatency, processId);
+    }
 }
 
 std::shared_ptr<SALAM::Value> createClone(const std::shared_ptr<SALAM::Value>& b)
@@ -137,15 +155,31 @@ LLVMInterface::ActiveFunction::processQueues()
                     if ((inst)->isLoad()) {
                         // RAW protection to ensure a writeback finishes before reading that location
                         if (inst->isLoadingInternal()) {
-                            launchRead(inst);
-                            if (dbg) DPRINTFS(Runtime, owner,  "\t\t  |-Erase From Queue: %s - UID[%i]\n", llvm::Instruction::getOpcodeName((*queue_iter)->getOpode()), (*queue_iter)->getUID());
-                            queue_iter = reservation.erase(queue_iter);
-                            hw_cycle_stats.loadInternal++;
+                            if (launchRead(inst)) {
+                                if (dbg)
+                                    DPRINTFS(Runtime, owner,
+                                        "\t\t  |-Erase: %s - UID[%i]\n",
+                                        llvm::Instruction::getOpcodeName(
+                                            (*queue_iter)->getOpode()),
+                                        (*queue_iter)->getUID());
+                                queue_iter = reservation.erase(queue_iter);
+                                hw_cycle_stats.loadInternal++;
+                            } else {
+                                ++queue_iter;
+                            }
                         } else if (!writeActive(inst->getPtrOperandValue(0))) {
-                            launchRead(inst);
-                            if (dbg) DPRINTFS(Runtime, owner,  "\t\t  |-Erase From Queue: %s - UID[%i]\n", llvm::Instruction::getOpcodeName((*queue_iter)->getOpode()), (*queue_iter)->getUID());
-                            queue_iter = reservation.erase(queue_iter);
-                            hw_cycle_stats.loadAcitve++;
+                            if (launchRead(inst)) {
+                                if (dbg)
+                                    DPRINTFS(Runtime, owner,
+                                        "\t\t  |-Erase: %s - UID[%i]\n",
+                                        llvm::Instruction::getOpcodeName(
+                                            (*queue_iter)->getOpode()),
+                                        (*queue_iter)->getUID());
+                                queue_iter = reservation.erase(queue_iter);
+                                hw_cycle_stats.loadAcitve++;
+                            } else {
+                                ++queue_iter;
+                            }
                         } else {
                             auto activeWrite = getActiveWrite(inst->getPtrOperandValue(0));
                             inst->addRuntimeDependency(activeWrite);
@@ -154,12 +188,19 @@ LLVMInterface::ActiveFunction::processQueues()
                             hw_cycle_stats.loadRawStall++;
                         }
                     } else if ((inst)->isStore()) {
-                        // WAR Protection to insure reading finishes before a write
-                        // if (!readActive(inst->getPtrOperandValue(1))) {
-                        launchWrite(inst);
-                        if (dbg) DPRINTFS(Runtime, owner,  "\t\t  |-Erase From Queue: %s - UID[%i]\n", llvm::Instruction::getOpcodeName((*queue_iter)->getOpode()), (*queue_iter)->getUID());
-                        queue_iter = reservation.erase(queue_iter);
-                        hw_cycle_stats.storeActive++;
+                        // WAR Protection
+                        if (launchWrite(inst)) {
+                            if (dbg)
+                                DPRINTFS(Runtime, owner,
+                                    "\t\t  |-Erase: %s - UID[%i]\n",
+                                    llvm::Instruction::getOpcodeName(
+                                        (*queue_iter)->getOpode()),
+                                    (*queue_iter)->getUID());
+                            queue_iter = reservation.erase(queue_iter);
+                            hw_cycle_stats.storeActive++;
+                        } else {
+                            ++queue_iter;
+                        }
                         // } else {
                         //     auto activeRead = getActiveRead(inst->getPtrOperandValue(1));
                         //     inst->addRuntimeDependency(activeRead);
@@ -554,17 +595,46 @@ LLVMInterface::launchRead(MemoryRequest * memReq, ActiveFunction * func) {
     comm->enqueueRead(memReq);
 }
 
-void
-LLVMInterface::ActiveFunction::launchRead(std::shared_ptr<SALAM::Instruction> readInst) {
+bool
+LLVMInterface::ActiveFunction::launchRead(
+    std::shared_ptr<SALAM::Instruction> readInst)
+{
     auto rdInst = std::dynamic_pointer_cast<SALAM::Load>(readInst);
     if (rdInst->isLoadingInternal()) {
         rdInst->loadInternal();
+        return true;  // Internal load completed
     } else {
+        // Get the pointer address before creating the memory request
+        uint64_t ptrAddr = readInst->getPtrOperandValue(0);
+        size_t reqSize = rdInst->getSizeInBytes();
+
+        // ============================================
+        // CHECK IF KERNEL VALIDATION IS ENABLED
+        // If enabled, send validation request to kernel driver (KD)
+        // and defer memory access until kernel responds OK
+        // ============================================
+        if (owner->isKernelValidationEnabled()) {
+            // Check if validation is already pending for this instruction
+            if (owner->isValidationPending(readInst->getUID())) {
+                // Validation already in progress
+                return false;
+            }
+            if (dbg)
+                DPRINTFS(RuntimeCompute, owner,
+                    "|| Sending kernel validation for READ: "
+                    "addr=0x%016lx, size=%lu\n",
+                    ptrAddr, (unsigned long)reqSize);
+            owner->sendValidationRequest(
+                ptrAddr, reqSize, true, readInst, this);
+            return false;
+        }
+
         auto memReq = (readInst)->createMemoryRequest();
         auto rd_uid = readInst->getUID();
         readQueue.insert({rd_uid, (readInst)});
         readQueueMap.insert({memReq, rd_uid});
         owner->launchRead(memReq, this);
+        return true;  // Read launched successfully
     }
 }
 
@@ -574,14 +644,42 @@ LLVMInterface::launchWrite(MemoryRequest * memReq, ActiveFunction * func) {
     comm->enqueueWrite(memReq);
 }
 
-void
-LLVMInterface::ActiveFunction::launchWrite(std::shared_ptr<SALAM::Instruction> writeInst) {
+bool
+LLVMInterface::ActiveFunction::launchWrite(
+    std::shared_ptr<SALAM::Instruction> writeInst)
+{
+    // Get the pointer address before creating the memory request
+    uint64_t ptrAddr = writeInst->getPtrOperandValue(1);
+    size_t reqSize = writeInst->getOperands()->at(0).getSizeInBytes();
+
+    // ============================================
+    // CHECK IF KERNEL VALIDATION IS ENABLED
+    // If enabled, send validation request to kernel driver (KD)
+    // and defer memory access until kernel responds OK
+    // ============================================
+    if (owner->isKernelValidationEnabled()) {
+        // Check if validation is already pending for this instruction
+        if (owner->isValidationPending(writeInst->getUID())) {
+            // Validation already in progress
+            return false;
+        }
+        if (dbg)
+            DPRINTFS(RuntimeCompute, owner,
+                "|| Sending kernel validation for WRITE: "
+                "addr=0x%016lx, size=%lu\n",
+                ptrAddr, (unsigned long)reqSize);
+        owner->sendValidationRequest(
+            ptrAddr, reqSize, false, writeInst, this);
+        return false;
+    }
+
     auto memReq = (writeInst)->createMemoryRequest();
     trackWrite(memReq->getAddress(), writeInst);
     auto wr_uid = writeInst->getUID();
     writeQueue.insert({wr_uid, (writeInst)});
     writeQueueMap.insert({memReq, wr_uid});
     owner->launchWrite(memReq, this);
+    return true;  // Write launched successfully
 }
 
 void
@@ -904,6 +1002,9 @@ LLVMInterface::printResults() {
     std::cout << "   Stalls:                          " << stalls << " cycles" << std::endl;
     std::cout << "   Executed Nodes:                  " << (cycle-stalls-1) << " cycles" << std::endl;
     std::cout << std::endl;
+
+    // Print kernel validation statistics
+    printKernelValidationStats();
 }
 
 void
@@ -1068,4 +1169,211 @@ LLVMInterface::createInstruction(llvm::Instruction * inst, uint64_t id) {
             return SALAM::createBadInst(id, this, dbg, OpCode, 0, 0); break;
         }
     }
+}
+
+// Kernel validation functions
+// Models AIA consulting KD for SMID validation
+
+void
+LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
+                                     std::shared_ptr<SALAM::Instruction> inst,
+                                     ActiveFunction* func)
+{
+    // Create pending validation request
+    PendingValidationRequest req;
+    req.addr = addr;
+    req.size = size;
+    req.isRead = isRead;
+    req.inst = inst;
+    req.func = func;
+    req.requestTime = curTick();
+    req.pid = processId;
+    req.requestId = nextValidationRequestId++;
+
+    DPRINTF(LLVMInterface,
+            "[AIA->KD] Validation req #%llu: %s addr=0x%016lx, "
+            "size=%lu, pid=%llu, uid=%llu\n",
+            req.requestId, isRead ? "READ" : "WRITE", addr,
+            (unsigned long)size, processId, inst->getUID());
+
+    // Track this instruction as pending validation
+    pendingValidationUIDs.insert(inst->getUID());
+
+    // Queue the request
+    pendingValidations.push_back(req);
+    totalKernelValidations++;
+
+    // Send interrupt to CPU/kernel if GIC is available
+    BaseGic* gic = comm->getGic();
+    if (gic && validationIntNum >= 0) {
+        DPRINTF(LLVMInterface,
+                "[AIA->KD] Raising interrupt %d to kernel\n",
+                validationIntNum);
+        gic->sendInt(validationIntNum);
+    }
+
+    // Schedule validation response event
+    if (!validationResponseEvent.scheduled()) {
+        schedule(validationResponseEvent,
+                 curTick() + kernelValidationLatency);
+        DPRINTF(LLVMInterface,
+                "[AIA] Scheduled response in %llu ticks\n",
+                kernelValidationLatency);
+    }
+}
+
+void
+LLVMInterface::processValidationResponse()
+{
+    // Process pending validation requests
+    Tick currentTick = curTick();
+
+    while (!pendingValidations.empty()) {
+        PendingValidationRequest& req = pendingValidations.front();
+
+        // Check if this request has waited long enough
+        if (currentTick < req.requestTime + kernelValidationLatency) {
+            // Not ready yet, reschedule
+            schedule(validationResponseEvent,
+                     req.requestTime + kernelValidationLatency);
+            return;
+        }
+
+        // Kernel validation complete
+        bool validationOK = validateWithKernel(req.addr, req.size, req.pid);
+
+        Tick validationTime = currentTick - req.requestTime;
+        totalKernelValidationLatency += validationTime;
+
+        DPRINTF(LLVMInterface,
+                "[KD->AIA] Response #%llu: %s addr=0x%016lx, "
+                "pid=%llu, uid=%llu => %s (lat=%llu)\n",
+                req.requestId, req.isRead ? "READ" : "WRITE",
+                req.addr, req.pid, req.inst->getUID(),
+                validationOK ? "OK" : "DENIED", validationTime);
+
+        // Remove from pending validation UIDs set
+        pendingValidationUIDs.erase(req.inst->getUID());
+
+        // Remove instruction from reservation queue
+        req.func->removeFromReservation(req.inst->getUID());
+
+        // Clear interrupt if GIC is available
+        BaseGic* gic = comm->getGic();
+        if (gic && validationIntNum >= 0) {
+            gic->clearInt(validationIntNum);
+        }
+
+        if (validationOK) {
+            // Proceed with the memory access
+            if (req.isRead) {
+                auto memReq = req.inst->createMemoryRequest();
+                auto rd_uid = req.inst->getUID();
+                req.func->readQueue.insert({rd_uid, req.inst});
+                req.func->readQueueMap.insert({memReq, rd_uid});
+                launchRead(memReq, req.func);
+                DPRINTF(LLVMInterface,
+                        "[AIA] Proceeding with READ at 0x%016lx\n",
+                        req.addr);
+            } else {
+                auto memReq = req.inst->createMemoryRequest();
+                req.func->trackWrite(memReq->getAddress(), req.inst);
+                auto wr_uid = req.inst->getUID();
+                req.func->writeQueue.insert({wr_uid, req.inst});
+                req.func->writeQueueMap.insert({memReq, wr_uid});
+                launchWrite(memReq, req.func);
+                DPRINTF(LLVMInterface,
+                        "[AIA] Proceeding with WRITE at 0x%016lx\n",
+                        req.addr);
+            }
+        } else {
+            // Access denied by kernel
+            kernelValidationDenied++;
+            panic("[SECURITY] Kernel denied %s: addr=0x%016lx, pid=%llu",
+                  req.isRead ? "READ" : "WRITE", req.addr, req.pid);
+        }
+
+        // Remove processed request
+        pendingValidations.pop_front();
+    }
+}
+
+bool
+LLVMInterface::validateWithKernel(uint64_t addr, size_t size, uint64_t pid)
+{
+    // Kernel validation logic
+    // Models KD checking if SMID is valid for PID
+
+    // 1. Null pointer check
+    if (addr == 0) {
+        DPRINTF(LLVMInterface, "[KD] FAILED: NULL pointer\n");
+        return false;
+    }
+
+    // 2. Define allowed memory regions for accelerator
+    struct MemRegion
+    {
+        uint64_t start;
+        uint64_t end;
+        const char* name;
+    };
+
+    // Memory regions for gem5-SALAM MobileNetV2
+    static const MemRegion allowedRegions[] = {
+        {0x80000000, 0x80100000, "DMA/SPM"},
+        {0x8f000000, 0x90000000, "features"},
+        {0x91000000, 0x92000000, "weights"},
+        {0x93000000, 0x94000000, "qparams"},
+        {0x10020000, 0x10030000, "cluster_regs"},
+        {0x2f000000, 0x30000000, "local_mem"},
+    };
+
+    bool inAllowedRegion = false;
+    for (const auto& region : allowedRegions) {
+        if (addr >= region.start && (addr + size) <= region.end) {
+            inAllowedRegion = true;
+            DPRINTF(LLVMInterface,
+                    "[KD] Addr 0x%016lx in region: %s\n",
+                    addr, region.name);
+            break;
+        }
+    }
+
+    if (!inAllowedRegion) {
+        DPRINTF(LLVMInterface,
+                "[KD] FAILED: addr=0x%016lx not allowed for pid=%llu\n",
+                addr, pid);
+        return false;
+    }
+
+    DPRINTF(LLVMInterface,
+            "[KD] PASSED: addr=0x%016lx, size=%lu, pid=%llu\n",
+            addr, (unsigned long)size, pid);
+    return true;
+}
+
+void
+LLVMInterface::printKernelValidationStats()
+{
+    double totalValidationTime =
+        (double)(totalKernelValidationLatency) * (1e-6);
+    double avgValidationTime = totalKernelValidations > 0 ?
+        totalValidationTime / totalKernelValidations : 0.0;
+
+    std::cout << "   ========= Kernel Validation Stats =========="
+              << std::endl;
+    std::cout << "   Kernel validation enabled:       "
+              << (enableKernelValidation ? "YES" : "NO") << std::endl;
+    std::cout << "   Total validation requests:       "
+              << totalKernelValidations << std::endl;
+    std::cout << "   Validations denied:              "
+              << kernelValidationDenied << std::endl;
+    std::cout << "   Total validation latency:        "
+              << totalValidationTime << " us" << std::endl;
+    std::cout << "   Average validation latency:      "
+              << avgValidationTime << " us" << std::endl;
+    std::cout << "   Configured latency per check:    "
+              << (double)(kernelValidationLatency) * (1e-6)
+              << " us" << std::endl;
+    std::cout << std::endl;
 }

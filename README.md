@@ -107,6 +107,25 @@ Below are some resources in the gem5-SALAM directory that can be used when getti
 
 The system validation examples under **benchmarks/sys_validation** are good examples for how you interface with the gem5-SALAM simulation objects.
 
+## Running MobileNetV2 Benchmark
+
+MobileNetV2 is a neural network benchmark that demonstrates gem5-SALAM's accelerator capabilities.
+
+```bash
+cd $M5_PATH/benchmarks/mobilenetv2
+make
+```
+
+**Run with tracing:**
+```bash
+./tools/run_system.sh --bench mobilenetv2 --bench-path benchmarks/mobilenetv2 --config-name 1_config.yml -f "LLVMInterface,NoncoherentDma,CommInterface" -p
+```
+
+**View results:**
+```bash
+cat BM_ARM_OUT/benchmarks/mobilenetv2/debug-trace.txt
+```
+
 In order to use the system validation benchmarks, it is required to have the ARM GCC cross-compiler installed. If you didn't already install it when you setup the dependencies, you can install it in Ubuntu by running the below command:
 
 ```bash

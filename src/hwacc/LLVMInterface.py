@@ -6,9 +6,15 @@ from m5.objects.ComputeUnit import ComputeUnit
 class LLVMInterface(ComputeUnit):
     type = 'LLVMInterface'
     cxx_header = "hwacc/llvm_interface.hh"
-    
+
     in_file = Param.String("LLVM Trace File")
-    lockstep_mode = Param.Bool(True, "TRUE: Stall datapath if any operation stalls. FALSE: Only stall datapath regions with stalls")
-    sched_threshold = Param.UInt32(10000, "Scheduling window threshold. Prevents scheduling windows size from exploding during regions of high loop parallelism")
+    lockstep_mode = Param.Bool(True, "Stall datapath if any op stalls")
+    sched_threshold = Param.UInt32(10000, "Scheduling window threshold")
     clock_period = Param.Int32(10, "System clock speed")
-    top_name = Param.String("top", "Name of the top-level function for the accelerator")
+    top_name = Param.String("top", "Top-level function name")
+
+    # Kernel validation parameters (AIA-KD SMID verification)
+    enable_kernel_validation = Param.Bool(True, "Enable kernel validation")
+    validation_int_num = Param.Int32(172, "Interrupt number for validation")
+    kernel_validation_latency = Param.Tick(0, "Kernel validation latency")
+    process_id = Param.UInt64(17, "Process ID for SMID validation")

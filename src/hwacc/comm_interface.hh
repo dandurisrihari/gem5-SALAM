@@ -34,6 +34,8 @@ class CommInterface : public BasicPioDevice
 
   public:
     bool debug() { return debugEnabled; }
+    BaseGic* getGic() { return gic; }
+    int32_t getIntNum() { return int_num; }
 
   protected:
     class MemSidePort : public StreamRequestPort

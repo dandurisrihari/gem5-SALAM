@@ -16,6 +16,8 @@ CONFIG_NAME="1_config.yml"
 LATENCIES="0,10000,50000,100000"
 PARALLEL_JOBS=4
 DRY_RUN=False
+ENABLE_TRACE=False
+TRACE_FLAGS="LLVMInterface"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -43,6 +45,14 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=True
       shift
       ;;
+    --trace|-t)
+      ENABLE_TRACE=True
+      shift
+      ;;
+    --trace-flags)
+      TRACE_FLAGS="$2"
+      shift; shift
+      ;;
     -h|--help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -52,10 +62,13 @@ while [[ $# -gt 0 ]]; do
       echo "  --config-name    Config file name (default: 1_config.yml)"
       echo "  --latencies      Comma-separated latencies (default: 0,10000,50000,100000)"
       echo "  --parallel, -j   Number of parallel jobs (default: 4)"
+      echo "  --trace, -t      Enable debug tracing"
+      echo "  --trace-flags    Debug trace flags (default: LLVMInterface,NoncoherentDma,CommInterface)"
       echo "  --dry-run        Print commands without executing"
       echo ""
       echo "Example:"
       echo "  $0 --bench mobilenetv2 --latencies 0,5000,10000,25000,50000 --parallel 3"
+      echo "  $0 --bench mobilenetv2 --latencies 10000 --trace"
       exit 0
       ;;
     *)
@@ -86,6 +99,10 @@ echo "Benchmark Path:  $BENCH_PATH"
 echo "Config:          $CONFIG_NAME"
 echo "Latencies:       ${LAT_ARRAY[*]}"
 echo "Parallel Jobs:   $PARALLEL_JOBS"
+echo "Tracing:         $ENABLE_TRACE"
+if [ "$ENABLE_TRACE" == "True" ]; then
+    echo "Trace Flags:     $TRACE_FLAGS"
+fi
 echo "Output Base:     $BASE_OUTDIR"
 echo "=============================================="
 
@@ -157,7 +174,14 @@ for lat in "${LAT_ARRAY[@]}"; do
 
     CACHE_OPTS="--caches --l2cache"
 
-    CMD="$BINARY --outdir=$OUTDIR \
+    # Build trace options if enabled
+    if [ "$ENABLE_TRACE" == "True" ]; then
+        TRACE_OPTS="--debug-flags=$TRACE_FLAGS --debug-file=debug-trace.txt"
+    else
+        TRACE_OPTS=""
+    fi
+
+    CMD="$BINARY --outdir=$OUTDIR $TRACE_OPTS \
          ${M5_PATH}/configs/SALAM/fs_${BENCH}.py $SYS_OPTS \
          --accpath=${M5_PATH}/${BENCH_PATH} \
          --accbench=$BENCH $CACHE_OPTS $VALIDATION_OPTS"

@@ -153,6 +153,103 @@ $M5_PATH/tools/run_system.sh --bench bfs --bench-path benchmarks/sys_validation/
 
 If you would like to see the gem5-SALAM command created by the shell file you would just need to inspect the **RUN_SCRIPT** variable in the shell file.
 
+# Security Validation for Accelerators
+
+Added support to gem5-SALAM for modeling **kernel-based memory validation performance calculation** to prevent confused deputy attacks on hardware accelerators. This feature models the latency overhead of having the kernel validate accelerator memory accesses.
+
+## Background
+
+When hardware accelerators perform DMA operations, they access memory on behalf of user processes. Without proper validation, a malicious process could trick the accelerator into accessing memory it shouldn't have access to (confused deputy attack). The kernel validation feature models the overhead of having the OS validate each unique memory page accessed by the accelerator.
+
+## Enabling Kernel Validation
+
+Add the `--enable-kernel-validation` flag when running simulations:
+
+```bash
+./tools/run_system.sh --bench mobilenetv2 --bench-path benchmarks/mobilenetv2 \
+    -- --enable-kernel-validation --kernel-validation-latency=10000
+```
+
+## Validation Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--enable-kernel-validation` | False | Enable validation checks |
+| `--kernel-validation-latency` | 10000 | Latency in ticks for each validation |
+| `--validation-int-num` | 172 | GIC interrupt number for validation |
+| `--process-id` | 17 | Process ID for validation context |
+
+## How It Works
+
+1. **First access to a memory page**: Incurs validation latency (models kernel checking page tables)
+2. **Subsequent accesses to same page**: No latency (page cached as validated)
+3. **Per-process caching**: Each process has its own validation cache
+
+## Trace Output
+
+Enable tracing to see validation events:
+
+```bash
+./tools/run_system.sh --bench mobilenetv2 --bench-path benchmarks/mobilenetv2 \
+    -f "LLVMInterface" -- --enable-kernel-validation --kernel-validation-latency=10000
+```
+
+Example trace output:
+```
+[AIA->KD] Validation req #0: READ addr=0x10021e00 (page 0x10021000), pid=17
+[AIA->KD] Raising interrupt 172 to kernel
+[AIA] Scheduled response in 10000 ticks
+[KD->AIA] Response #0: READ addr=0x10021e00, pid=17 => OK (lat=10000)
+[AIA] Cache HIT: READ addr=0x10021e40 (page 0x10021000) pid=17
+```
+
+# Parallel Experiment Runner
+
+The `run_parallel.sh` script allows running multiple experiments with different validation latencies in parallel.
+
+## Usage
+
+```bash
+./tools/run_parallel.sh [OPTIONS]
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--bench` | mobilenetv2 | Benchmark name |
+| `--bench-path` | benchmarks/mobilenetv2 | Path to benchmark |
+| `--config-name` | 1_config.yml | Accelerator config file |
+| `--latencies` | 0,10000,50000,100000 | Comma-separated validation latencies |
+| `--parallel`, `-j` | 4 | Number of parallel jobs |
+| `--trace`, `-t` | disabled | Enable debug tracing |
+| `--trace-flags` | LLVMInterface | Debug trace flags |
+| `--dry-run` | disabled | Print commands without executing |
+
+## Examples
+
+**Run experiments with multiple latencies:**
+```bash
+./tools/run_parallel.sh --latencies 0,5000,10000,25000,50000 --parallel 3
+```
+
+**Dry run to see commands:**
+```bash
+./tools/run_parallel.sh --latencies 0,10000 --dry-run
+```
+
+**Run with tracing enabled:**
+```bash
+./tools/run_parallel.sh --latencies 10000 --trace
+```
+
+## Output
+
+Results are saved to `BM_ARM_OUT/<benchmark>_experiments_<timestamp>/`:
+- `baseline_no_validation/` - Results without validation
+- `latency_<N>/` - Results with validation latency N
+- `summary.csv` - Summary of all experiments
+
 # Resources
 
 ## gem5 Documentation

@@ -17,6 +17,7 @@ LLVMInterface::LLVMInterface(const LLVMInterfaceParams &p):
     totalKernelValidations(0),
     totalKernelValidationLatency(0),
     kernelValidationDenied(0),
+    validationCacheHits(0),
     validationResponseEvent(
         [this]{ processValidationResponse(); }, name())
 {
@@ -610,23 +611,35 @@ LLVMInterface::ActiveFunction::launchRead(
 
         // ============================================
         // CHECK IF KERNEL VALIDATION IS ENABLED
-        // If enabled, send validation request to kernel driver (KD)
-        // and defer memory access until kernel responds OK
+        // If enabled, check if page is already validated (cache hit)
+        // or send validation request to kernel driver (KD)
         // ============================================
         if (owner->isKernelValidationEnabled()) {
-            // Check if validation is already pending for this instruction
-            if (owner->isValidationPending(readInst->getUID())) {
-                // Validation already in progress
+            // Check if this page is already validated (cache hit - no latency)
+            if (owner->isPageValidated(ptrAddr)) {
+                // Cache hit - proceed directly without validation latency
+                owner->incrementValidationCacheHits();
+                if (dbg)
+                    DPRINTFS(RuntimeCompute, owner,
+                        "|| Cache HIT for READ: addr=0x%016lx - proceeding\n",
+                        ptrAddr);
+                // Fall through to launch the read normally
+            } else {
+                // Cache miss - need validation
+                // Check if validation is already pending for this instruction
+                if (owner->isValidationPending(readInst->getUID())) {
+                    // Validation already in progress
+                    return false;
+                }
+                if (dbg)
+                    DPRINTFS(RuntimeCompute, owner,
+                        "|| Sending kernel validation for READ: "
+                        "addr=0x%016lx, size=%lu\n",
+                        ptrAddr, (unsigned long)reqSize);
+                owner->sendValidationRequest(
+                    ptrAddr, reqSize, true, readInst, this);
                 return false;
             }
-            if (dbg)
-                DPRINTFS(RuntimeCompute, owner,
-                    "|| Sending kernel validation for READ: "
-                    "addr=0x%016lx, size=%lu\n",
-                    ptrAddr, (unsigned long)reqSize);
-            owner->sendValidationRequest(
-                ptrAddr, reqSize, true, readInst, this);
-            return false;
         }
 
         auto memReq = (readInst)->createMemoryRequest();
@@ -654,23 +667,35 @@ LLVMInterface::ActiveFunction::launchWrite(
 
     // ============================================
     // CHECK IF KERNEL VALIDATION IS ENABLED
-    // If enabled, send validation request to kernel driver (KD)
-    // and defer memory access until kernel responds OK
+    // If enabled, check if page is already validated (cache hit)
+    // or send validation request to kernel driver (KD)
     // ============================================
     if (owner->isKernelValidationEnabled()) {
-        // Check if validation is already pending for this instruction
-        if (owner->isValidationPending(writeInst->getUID())) {
-            // Validation already in progress
+        // Check if this page is already validated (cache hit - no latency)
+        if (owner->isPageValidated(ptrAddr)) {
+            // Cache hit - proceed directly without validation latency
+            owner->incrementValidationCacheHits();
+            if (dbg)
+                DPRINTFS(RuntimeCompute, owner,
+                    "|| Cache HIT for WRITE: addr=0x%016lx - proceeding\n",
+                    ptrAddr);
+            // Fall through to launch the write normally
+        } else {
+            // Cache miss - need validation
+            // Check if validation is already pending for this instruction
+            if (owner->isValidationPending(writeInst->getUID())) {
+                // Validation already in progress
+                return false;
+            }
+            if (dbg)
+                DPRINTFS(RuntimeCompute, owner,
+                    "|| Sending kernel validation for WRITE: "
+                    "addr=0x%016lx, size=%lu\n",
+                    ptrAddr, (unsigned long)reqSize);
+            owner->sendValidationRequest(
+                ptrAddr, reqSize, false, writeInst, this);
             return false;
         }
-        if (dbg)
-            DPRINTFS(RuntimeCompute, owner,
-                "|| Sending kernel validation for WRITE: "
-                "addr=0x%016lx, size=%lu\n",
-                ptrAddr, (unsigned long)reqSize);
-        owner->sendValidationRequest(
-            ptrAddr, reqSize, false, writeInst, this);
-        return false;
     }
 
     auto memReq = (writeInst)->createMemoryRequest();
@@ -1179,6 +1204,10 @@ LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
                                      std::shared_ptr<SALAM::Instruction> inst,
                                      ActiveFunction* func)
 {
+    // Cache miss - need to validate (incurs latency)
+    // Cache check is done in launchRead/launchWrite before calling this
+    uint64_t pageAddr = addr & ~0xFFFULL;
+
     // Create pending validation request
     PendingValidationRequest req;
     req.addr = addr;
@@ -1191,9 +1220,9 @@ LLVMInterface::sendValidationRequest(uint64_t addr, size_t size, bool isRead,
     req.requestId = nextValidationRequestId++;
 
     DPRINTF(LLVMInterface,
-            "[AIA->KD] Validation req #%llu: %s addr=0x%016lx, "
+            "[AIA->KD] Validation req #%llu: %s addr=0x%016lx (page 0x%016lx), "
             "size=%lu, pid=%llu, uid=%llu\n",
-            req.requestId, isRead ? "READ" : "WRITE", addr,
+            req.requestId, isRead ? "READ" : "WRITE", addr, pageAddr,
             (unsigned long)size, processId, inst->getUID());
 
     // Track this instruction as pending validation
@@ -1239,8 +1268,12 @@ LLVMInterface::processValidationResponse()
             return;
         }
 
-        // Kernel validation complete
+        // Kernel validation complete - always passes, we just model latency
         bool validationOK = validateWithKernel(req.addr, req.size, req.pid);
+
+        // Cache this page for this process so future accesses skip validation
+        uint64_t pageAddr = req.addr & ~0xFFFULL;
+        validatedPagesPerProcess[req.pid].insert(pageAddr);
 
         Tick validationTime = currentTick - req.requestTime;
         totalKernelValidationLatency += validationTime;
@@ -1301,53 +1334,11 @@ LLVMInterface::processValidationResponse()
 bool
 LLVMInterface::validateWithKernel(uint64_t addr, size_t size, uint64_t pid)
 {
-    // Kernel validation logic
-    // Models KD checking if SMID is valid for PID
-
-    // 1. Null pointer check
-    if (addr == 0) {
-        DPRINTF(LLVMInterface, "[KD] FAILED: NULL pointer\n");
-        return false;
-    }
-
-    // 2. Define allowed memory regions for accelerator
-    struct MemRegion
-    {
-        uint64_t start;
-        uint64_t end;
-        const char* name;
-    };
-
-    // Memory regions for gem5-SALAM MobileNetV2
-    static const MemRegion allowedRegions[] = {
-        {0x80000000, 0x80100000, "DMA/SPM"},
-        {0x8f000000, 0x90000000, "features"},
-        {0x91000000, 0x92000000, "weights"},
-        {0x93000000, 0x94000000, "qparams"},
-        {0x10020000, 0x10030000, "cluster_regs"},
-        {0x2f000000, 0x30000000, "local_mem"},
-    };
-
-    bool inAllowedRegion = false;
-    for (const auto& region : allowedRegions) {
-        if (addr >= region.start && (addr + size) <= region.end) {
-            inAllowedRegion = true;
-            DPRINTF(LLVMInterface,
-                    "[KD] Addr 0x%016lx in region: %s\n",
-                    addr, region.name);
-            break;
-        }
-    }
-
-    if (!inAllowedRegion) {
-        DPRINTF(LLVMInterface,
-                "[KD] FAILED: addr=0x%016lx not allowed for pid=%llu\n",
-                addr, pid);
-        return false;
-    }
-
+    // Kernel validation - always returns true
+    // We only model the latency overhead of the validation check
+    // The actual security check is performed by the kernel driver
     DPRINTF(LLVMInterface,
-            "[KD] PASSED: addr=0x%016lx, size=%lu, pid=%llu\n",
+            "[KD] VALIDATED: addr=0x%016lx, size=%lu, pid=%llu\n",
             addr, (unsigned long)size, pid);
     return true;
 }
@@ -1375,5 +1366,21 @@ LLVMInterface::printKernelValidationStats()
     std::cout << "   Configured latency per check:    "
               << (double)(kernelValidationLatency) * (1e-6)
               << " us" << std::endl;
+    std::cout << "   Validation cache hits:           "
+              << validationCacheHits << std::endl;
+    // Count total unique pages across all processes
+    size_t totalUniquePages = 0;
+    for (const auto& procCache : validatedPagesPerProcess) {
+        totalUniquePages += procCache.second.size();
+    }
+    std::cout << "   Processes with cached pages:     "
+              << validatedPagesPerProcess.size() << std::endl;
+    std::cout << "   Unique pages validated (total):  "
+              << totalUniquePages << std::endl;
+    uint64_t totalAccesses = totalKernelValidations + validationCacheHits;
+    std::cout << "   Cache hit rate:                  "
+              << (totalAccesses > 0 ?
+                  (100.0 * validationCacheHits / totalAccesses) : 0.0)
+              << "%" << std::endl;
     std::cout << std::endl;
 }

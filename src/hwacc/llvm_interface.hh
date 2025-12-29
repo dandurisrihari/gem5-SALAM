@@ -91,6 +91,11 @@ class LLVMInterface : public ComputeUnit {
     uint64_t totalKernelValidations;
     Tick totalKernelValidationLatency;
     uint64_t kernelValidationDenied;
+    uint64_t validationCacheHits;
+
+    // Validation cache - per-process map of validated page addresses (4KB aligned)
+    // Key: process ID, Value: set of validated page addresses for that process
+    std::map<uint64_t, std::set<uint64_t>> validatedPagesPerProcess;
 
     // Validation response event
     EventFunctionWrapper validationResponseEvent;
@@ -260,6 +265,15 @@ class LLVMInterface : public ComputeUnit {
     bool isValidationPending(uint64_t uid) {
         return pendingValidationUIDs.count(uid) > 0;
     }
+    bool isPageValidated(uint64_t addr) {
+        uint64_t pageAddr = addr & ~0xFFFULL;
+        auto it = validatedPagesPerProcess.find(processId);
+        if (it != validatedPagesPerProcess.end()) {
+            return it->second.find(pageAddr) != it->second.end();
+        }
+        return false;
+    }
+    void incrementValidationCacheHits() { validationCacheHits++; }
     void sendValidationRequest(uint64_t addr, size_t size, bool isRead,
                                std::shared_ptr<SALAM::Instruction> inst,
                                ActiveFunction* func);

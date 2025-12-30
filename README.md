@@ -245,6 +245,11 @@ Run `./tools/run_parallel.sh --list` to see all available benchmarks:
 | stencil2d | benchmarks/sys_validation/stencil2d | 2D stencil computation |
 | stencil3d | benchmarks/sys_validation/stencil3d | 3D stencil computation |
 | mergesort | benchmarks/sys_validation/mergesort | Merge sort |
+| lenet_a | benchmarks/lenet/design_a | LeNet-5 CNN (design A) |
+| lenet_b | benchmarks/lenet/design_b | LeNet-5 CNN (design B) |
+| lenet_c | benchmarks/lenet/design_c | LeNet-5 CNN (design C) |
+| mobilenetv2_35 | benchmarks/mobilenetv2 | MobileNetV2 (width=0.35) |
+| mobilenetv2_75 | benchmarks/mobilenetv2 | MobileNetV2 (width=0.75) |
 
 ## Examples
 
@@ -275,7 +280,7 @@ Run `./tools/run_parallel.sh --list` to see all available benchmarks:
 
 **Run specific benchmark:**
 ```bash
-./tools/run_parallel.sh --bench gemm --bench-path benchmarks/sys_validation/gemm --latencies 0,10000
+./tools/run_parallel.sh --bench gemm --latencies 0,10000
 ```
 
 ## Automatic Building
@@ -309,6 +314,80 @@ BM_ARM_OUT/
     ├── mobilenetv2/
     └── summary.csv
 ```
+
+# Experiment Monitor
+
+The `experiment_monitor.py` script generates an HTML dashboard to monitor experiment progress in real-time.
+
+## Usage
+
+```bash
+./tools/experiment_monitor.py [OUTPUT_DIR] [OPTIONS]
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--latest` | - | Auto-detect latest output directory |
+| `--watch`, `-w` | disabled | Continuously update HTML file |
+| `--interval`, `-i` | 10 | Refresh interval in seconds |
+| `--output`, `-o` | experiment_status.html | Output HTML filename |
+| `--serve`, `-s` | disabled | Start HTTP server and open browser |
+| `--port`, `-p` | 8080 | HTTP server port |
+
+## Examples
+
+**Start server and open dashboard (recommended):**
+```bash
+./tools/experiment_monitor.py --latest --serve
+```
+
+**Watch for updates with auto-refresh and server:**
+```bash
+./tools/experiment_monitor.py --latest --watch --serve
+```
+
+**Generate dashboard for specific output directory:**
+```bash
+./tools/experiment_monitor.py BM_ARM_OUT/all_benchmarks_20251229_230316
+```
+
+**Auto-detect latest output and watch for updates:**
+```bash
+./tools/experiment_monitor.py --latest --watch
+```
+
+**Custom port and refresh interval:**
+```bash
+./tools/experiment_monitor.py --latest --watch --serve --port 9000 --interval 5
+```
+
+## Dashboard Features
+
+- **Summary cards**: Total, Completed, Running, Failed, Pending experiment counts
+- **Progress bar**: Overall completion percentage
+- **Performance charts**: Bar/line charts showing simulation time vs validation latency with overhead %
+- **Running processes**: Live list of gem5 PIDs with CPU/memory usage
+- **Experiments by benchmark**: Grouped view showing latency, status, sim time, and overhead
+- **Results table**: Completed experiments with simulation times, validations, and cache hit rates
+
+## Viewing the Dashboard
+
+**Option 1: Auto-start server (recommended):**
+```bash
+./tools/experiment_monitor.py --latest --serve
+# Opens http://localhost:8080/experiment_status.html automatically
+```
+
+**Option 2: Manual HTTP server:**
+```bash
+OUTPUT_DIR=$(ls -d BM_ARM_OUT/all_benchmarks_* | tail -1)
+python3 -m http.server 8080 --directory "$OUTPUT_DIR"
+# Then open http://localhost:8080/experiment_status.html
+```
+
+The dashboard auto-refreshes every 10 seconds (configurable).
 
 # Resources
 

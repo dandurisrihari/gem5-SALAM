@@ -147,7 +147,8 @@ class LLVMInterface : public ComputeUnit {
         bool dbg;
 
         inline bool uidActive(uint64_t id) {
-          return computeUIDActive(id) || readUIDActive(id) || writeUIDActive(id);
+          return computeUIDActive(id) || readUIDActive(id) || writeUIDActive(id) ||
+                 owner->isValidationPending(id);
         }
 
         std::map<Addr, std::shared_ptr<SALAM::Instruction>> activeWrites;

@@ -72,7 +72,7 @@ declare -A BENCH_CONFIG=(
 # ============================================================================
 # DEFAULTS & ARGUMENT PARSING
 # ============================================================================
-LATENCIES="0,6703000"
+LATENCIES="0,8367000"
 PARALLEL_JOBS=$(nproc)
 DRY_RUN=false
 RUN_ALL=false
@@ -116,7 +116,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --bench, -b NAME       Run single benchmark"
             echo "  --config, -c FILE      Config file for benchmark (use with --bench)"
             echo "  --bench-path PATH      Custom benchmark path (use with --bench)"
-            echo "  --latencies, -l LIST   Latencies (default: 0,6703000)"
+            echo "  --latencies, -l LIST   Latencies (default: 0,8367000)"
             echo "  --parallel, -j N       Parallel groups (default: $(nproc))"
             echo "  --outdir, -o DIR       Output directory"
             echo "  --exclude, -x LIST     Skip benchmarks (comma-separated)"

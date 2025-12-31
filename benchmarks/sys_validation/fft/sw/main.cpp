@@ -22,6 +22,8 @@ volatile uint32_t * loc_img       = (uint32_t *)(TOP+9);
 volatile uint32_t * loc_real_twid = (uint32_t *)(TOP+17);
 volatile uint32_t * loc_img_twid  = (uint32_t *)(TOP+25);
 
+#undef CHECK
+
 int __attribute__ ((optimize("0"))) main(void) {
 	double *real       	= (double *)(BASE+REAL_OFFSET);
 	double *img        	= (double *)(BASE+IMG_OFFSET);

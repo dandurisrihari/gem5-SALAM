@@ -345,25 +345,72 @@ def parse_run_log_stats(log_path):
         
         # Sum all occurrences of validation stats across all accelerators
         # These stats appear in each accelerator's output section
-        sum_patterns = {
-            'kernelValidationRequests': r'Total validation requests:\s+(\d+)',
-            'validationCacheHits': r'Validation cache hits:\s+(\d+)',
+        
+        # New format: Access Breakdown section
+        access_patterns = {
+            'totalMemAccesses': r'Total memory accesses \(validated\):\s+(\d+)',
+            'validationCacheHits': r'Cache hits \(0 latency\):\s+(\d+)',
+            'kernelValidationRequests': r'Validation requests \(full lat\):\s+(\d+)',
+            'coalescedWaits': r'Coalesced waits \(partial lat\):\s+(\d+)',
             'validationsDenied': r'Validations denied:\s+(\d+)',
-            'uniquePagesValidated': r'Unique pages validated \(total\):\s+(\d+)',
         }
         
-        # Sum these values across all accelerators
-        for key, pattern in sum_patterns.items():
+        # Latency Breakdown section
+        latency_patterns = {
+            'validationLatency': r'Validation request latency:\s+([\d.]+)\s*us',
+            'coalescedLatency': r'Coalesced wait latency:\s+([\d.]+)\s*us',
+            'totalSecurityOverhead': r'TOTAL SECURITY OVERHEAD:\s+([\d.]+)\s*us',
+            'avgOverheadPerAccess': r'Avg overhead per blocked access:\s+([\d.]+)\s*us',
+        }
+        
+        # Cache Statistics section
+        cache_patterns = {
+            'uniquePagesValidated': r'Unique pages validated \(total\):\s+(\d+)',
+            'validationCacheHitRate': r'Cache hit rate:\s+([\d.]+)%',
+        }
+        
+        # Fallback to old format patterns
+        old_patterns = {
+            'kernelValidationRequests': r'Total validation requests:\s+(\d+)',
+            'validationCacheHits': r'Validation cache hits:\s+(\d+)',
+            'totalValidationLatency': r'Total validation latency:\s+([\d.]+)\s*us',
+        }
+        
+        # Try new format first
+        for key, pattern in access_patterns.items():
             matches = re.findall(pattern, content)
             if matches:
                 total = sum(int(m) for m in matches)
                 stats[key] = str(total)
         
-        # For latency, sum total validation latency (in microseconds)
-        lat_matches = re.findall(r'Total validation latency:\s+([\d.]+)\s*us', content)
-        if lat_matches:
-            total_lat = sum(float(m) for m in lat_matches)
-            stats['totalValidationLatency'] = f"{total_lat:.1f}"
+        for key, pattern in latency_patterns.items():
+            matches = re.findall(pattern, content)
+            if matches:
+                total = sum(float(m) for m in matches)
+                stats[key] = f"{total:.2f}"
+        
+        for key, pattern in cache_patterns.items():
+            matches = re.findall(pattern, content)
+            if matches:
+                if '%' in pattern:
+                    # Average the percentages
+                    avg = sum(float(m) for m in matches) / len(matches)
+                    stats[key] = f"{avg:.1f}%"
+                else:
+                    total = sum(int(m) for m in matches)
+                    stats[key] = str(total)
+        
+        # Fallback to old format if new format not found
+        if 'kernelValidationRequests' not in stats:
+            for key, pattern in old_patterns.items():
+                matches = re.findall(pattern, content)
+                if matches:
+                    if 'latency' in key.lower():
+                        total = sum(float(m) for m in matches)
+                        stats[key] = f"{total:.1f}"
+                    else:
+                        total = sum(int(m) for m in matches)
+                        stats[key] = str(total)
         
         # Check if validation was enabled (just need one YES)
         if 'Kernel validation enabled:       YES' in content:
@@ -371,12 +418,13 @@ def parse_run_log_stats(log_path):
         elif 'Kernel validation enabled:       NO' in content:
             stats['validationEnabled'] = 'NO'
         
-        # Calculate combined cache hit rate if we have the data
-        if 'kernelValidationRequests' in stats and 'validationCacheHits' in stats:
-            requests = int(stats['kernelValidationRequests'])
-            hits = int(stats['validationCacheHits'])
-            if requests + hits > 0:
-                stats['validationCacheHitRate'] = f"{hits / (requests + hits) * 100:.1f}%"
+        # Calculate combined cache hit rate if we have the data and it's not already calculated
+        if 'validationCacheHitRate' not in stats:
+            if 'kernelValidationRequests' in stats and 'validationCacheHits' in stats:
+                requests = int(stats['kernelValidationRequests'])
+                hits = int(stats['validationCacheHits'])
+                if requests + hits > 0:
+                    stats['validationCacheHitRate'] = f"{hits / (requests + hits) * 100:.1f}%"
                 
     except Exception as e:
         pass

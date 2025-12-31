@@ -98,6 +98,7 @@ class LLVMInterface : public ComputeUnit {
         bool isRead;
         uint64_t addr;
         size_t size;
+        Tick queueTime;  // When this instruction started waiting
     };
     std::map<uint64_t, std::list<WaitingInstruction>> waitingForPage;
 
@@ -105,7 +106,9 @@ class LLVMInterface : public ComputeUnit {
     uint64_t totalKernelValidations;
     Tick totalKernelValidationLatency;
     uint64_t kernelValidationDenied;
-    uint64_t validationCacheHits;
+    uint64_t validationCacheHits;           // True cache hits (page already validated)
+    uint64_t validationCoalescedWaits;      // Instructions that waited for in-flight validation
+    Tick totalCoalescedWaitLatency;         // Total latency for coalesced waits
 
     // Validation cache - per-process map of validated page addresses (4KB aligned)
     // Key: process ID, Value: set of validated page addresses for that process
@@ -198,6 +201,10 @@ class LLVMInterface : public ComputeUnit {
             }
           }
           return false;
+        }
+        // Add instruction back to reservation queue (for deferred operations)
+        inline void addToReservation(std::shared_ptr<SALAM::Instruction> inst) {
+          reservation.push_back(inst);
         }
     public:
         ActiveFunction(LLVMInterface * _owner, std::shared_ptr<SALAM::Function> _func,

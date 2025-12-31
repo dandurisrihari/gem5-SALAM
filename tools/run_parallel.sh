@@ -7,6 +7,8 @@
 #
 # Usage: ./tools/run_parallel.sh --all
 #        ./tools/run_parallel.sh --bench bfs
+#        ./tools/run_parallel.sh --bench bfs --config my_config.yml
+#        ./tools/run_parallel.sh --bench bfs --bench-path /custom/path/to/bfs
 #        ./tools/run_parallel.sh --all --outdir BM_ARM_OUT/experiments_20251230_010000
 
 set -e
@@ -70,42 +72,111 @@ declare -A BENCH_CONFIG=(
 # ============================================================================
 # DEFAULTS & ARGUMENT PARSING
 # ============================================================================
-LATENCIES="0,1000000,5000000"
-PARALLEL_JOBS=12
+LATENCIES="0,6703000"
+PARALLEL_JOBS=$(nproc)
 DRY_RUN=false
 RUN_ALL=false
 SINGLE_BENCH=""
+CUSTOM_CONFIG=""
+CUSTOM_BENCH_PATH=""
 OUTPUT_DIR=""
 EXCLUDE=""
+ENABLE_TRACE=false
+TRACE_FLAGS="LLVMInterface"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --all|-a)       RUN_ALL=true; shift ;;
         --bench|-b)     SINGLE_BENCH="$2"; shift 2 ;;
+        --config|-c)    CUSTOM_CONFIG="$2"; shift 2 ;;
+        --bench-path)   CUSTOM_BENCH_PATH="$2"; shift 2 ;;
         --latencies|-l) LATENCIES="$2"; shift 2 ;;
         --parallel|-j)  PARALLEL_JOBS="$2"; shift 2 ;;
         --outdir|-o)    OUTPUT_DIR="$2"; shift 2 ;;
         --exclude|-x)   EXCLUDE="$2"; shift 2 ;;
+        --trace|-t)     ENABLE_TRACE=true; shift ;;
+        --trace-flags)  ENABLE_TRACE=true; TRACE_FLAGS="$2"; shift 2 ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --list)
             echo "Available groups:"
             for g in "${!BENCHMARK_GROUPS[@]}"; do
                 echo "  $g: ${BENCHMARK_GROUPS[$g]}"
             done
+            echo ""
+            echo "Available benchmarks with default configs:"
+            for b in "${!BENCH_CONFIG[@]}"; do
+                echo "  $b: path=${BENCH_PATH[$b]}, config=${BENCH_CONFIG[$b]}"
+            done
             exit 0 ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
-            echo "  --all, -a          Run all benchmarks"
-            echo "  --bench, -b NAME   Run single benchmark"
-            echo "  --latencies, -l    Latencies (default: 0,1000000,5000000)"
-            echo "  --parallel, -j N   Parallel groups (default: 12)"
-            echo "  --outdir, -o DIR   Output directory"
-            echo "  --exclude, -x LIST Skip benchmarks"
-            echo "  --dry-run          Show plan only"
+            echo ""
+            echo "Options:"
+            echo "  --all, -a              Run all benchmarks"
+            echo "  --bench, -b NAME       Run single benchmark"
+            echo "  --config, -c FILE      Config file for benchmark (use with --bench)"
+            echo "  --bench-path PATH      Custom benchmark path (use with --bench)"
+            echo "  --latencies, -l LIST   Latencies (default: 0,6703000)"
+            echo "  --parallel, -j N       Parallel groups (default: $(nproc))"
+            echo "  --outdir, -o DIR       Output directory"
+            echo "  --exclude, -x LIST     Skip benchmarks (comma-separated)"
+            echo "  --trace, -t            Enable gem5 debug tracing (LLVMInterface)"
+            echo "  --trace-flags FLAGS    Custom trace flags (default: LLVMInterface)"
+            echo "                         Common flags: LLVMInterface,Runtime,RuntimeCompute"
+            echo "  --dry-run              Show plan only"
+            echo "  --list                 List available benchmarks and configs"
+            echo ""
+            echo "Examples:"
+            echo "  # Run all benchmarks"
+            echo "  $0 --all"
+            echo ""
+            echo "  # Run with tracing enabled"
+            echo "  $0 --bench bfs --trace"
+            echo "  $0 --bench bfs --trace-flags 'LLVMInterface,Runtime'"
+            echo ""
+            echo "  # Run with custom latencies"
+            echo "  $0 --bench gemm --latencies 0,1000000,5000000"
+            echo ""
+            echo "  # Run custom benchmark"
+            echo "  $0 --bench mybench --bench-path benchmarks/custom/mybench --config config.yml"
+            echo ""
+            echo "  # Individual benchmarks with their configs:"
+            echo "  # --- sys_validation benchmarks ---"
+            echo "  $0 --bench bfs --config config.yml"
+            echo "  $0 --bench fft --config config.yml"
+            echo "  $0 --bench gemm --config config.yml"
+            echo "  $0 --bench md_grid --config config.yml"
+            echo "  $0 --bench md_knn --config config.yml"
+            echo "  $0 --bench nw --config config.yml"
+            echo "  $0 --bench spmv --config config.yml"
+            echo "  $0 --bench stencil2d --config config.yml"
+            echo "  $0 --bench stencil3d --config config.yml"
+            echo "  $0 --bench mergesort --config config.yml"
+            echo ""
+            echo "  # --- lenet benchmarks ---"
+            echo "  $0 --bench lenet_a --config config.yml"
+            echo "  $0 --bench lenet_b --config config.yml"
+            echo "  $0 --bench lenet_c --config config.yml"
+            echo ""
+            echo "  # --- mobilenetv2 benchmarks ---"
+            echo "  $0 --bench mobilenetv2 --config 1_config.yml"
+            echo "  $0 --bench mobilenetv2_35 --config 35_config.yml"
+            echo "  $0 --bench mobilenetv2_75 --config 75_config.yml"
             exit 0 ;;
-        *) echo "Unknown: $1"; exit 1 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Validate custom config/path options
+if [[ -n "$CUSTOM_CONFIG" && -z "$SINGLE_BENCH" ]]; then
+    echo "Error: --config requires --bench to be specified"
+    exit 1
+fi
+
+if [[ -n "$CUSTOM_BENCH_PATH" && -z "$SINGLE_BENCH" ]]; then
+    echo "Error: --bench-path requires --bench to be specified"
+    exit 1
+fi
 
 # ============================================================================
 # SETUP
@@ -122,13 +193,46 @@ if $RUN_ALL; then
         GROUPS_TO_RUN["$g"]="${BENCHMARK_GROUPS[$g]}"
     done
 elif [[ -n "$SINGLE_BENCH" ]]; then
+    # Check if benchmark exists in predefined list
+    found=false
     for g in "${!BENCHMARK_GROUPS[@]}"; do
         if [[ "${BENCHMARK_GROUPS[$g]}" == *"$SINGLE_BENCH"* ]]; then
             GROUPS_TO_RUN["$g"]="$SINGLE_BENCH"
+            found=true
             break
         fi
     done
-    [[ ${#GROUPS_TO_RUN[@]} -eq 0 ]] && { echo "Unknown benchmark: $SINGLE_BENCH"; exit 1; }
+    
+    # If not found but custom path provided, create a custom entry
+    if ! $found; then
+        if [[ -n "$CUSTOM_BENCH_PATH" ]]; then
+            # Add custom benchmark to the maps
+            BENCH_PATH["$SINGLE_BENCH"]="$CUSTOM_BENCH_PATH"
+            BENCH_CONFIG["$SINGLE_BENCH"]="${CUSTOM_CONFIG:-config.yml}"
+            BENCHMARK_GROUPS["$SINGLE_BENCH"]="$SINGLE_BENCH"
+            GROUPS_TO_RUN["$SINGLE_BENCH"]="$SINGLE_BENCH"
+            found=true
+            echo "Using custom benchmark: $SINGLE_BENCH"
+            echo "  Path: ${BENCH_PATH[$SINGLE_BENCH]}"
+            echo "  Config: ${BENCH_CONFIG[$SINGLE_BENCH]}"
+        else
+            echo "Unknown benchmark: $SINGLE_BENCH"
+            echo "Use --bench-path to specify a custom path, or use --list to see available benchmarks"
+            exit 1
+        fi
+    fi
+    
+    # Apply custom config override if specified (for known benchmarks)
+    if [[ -n "$CUSTOM_CONFIG" ]]; then
+        BENCH_CONFIG["$SINGLE_BENCH"]="$CUSTOM_CONFIG"
+        echo "Using custom config: $CUSTOM_CONFIG for $SINGLE_BENCH"
+    fi
+    
+    # Apply custom path override if specified (for known benchmarks)
+    if [[ -n "$CUSTOM_BENCH_PATH" && $found == true ]]; then
+        BENCH_PATH["$SINGLE_BENCH"]="$CUSTOM_BENCH_PATH"
+        echo "Using custom path: $CUSTOM_BENCH_PATH for $SINGLE_BENCH"
+    fi
 else
     echo "Specify --all or --bench NAME"; exit 1
 fi
@@ -167,6 +271,15 @@ echo "Benchmarks:  $total_bench"
 echo "Latencies:   ${LAT_ARRAY[*]}"
 echo "Total:       $total_exp experiments"
 echo "Output:      $BASE_OUTDIR"
+if $ENABLE_TRACE; then
+    echo "Tracing:     ENABLED (flags: $TRACE_FLAGS)"
+fi
+if [[ -n "$SINGLE_BENCH" ]]; then
+    echo "----------------------------------------------"
+    echo "Benchmark:   $SINGLE_BENCH"
+    echo "Path:        ${BENCH_PATH[$SINGLE_BENCH]}"
+    echo "Config:      ${BENCH_CONFIG[$SINGLE_BENCH]}"
+fi
 echo "=============================================="
 
 # Pre-create directories
@@ -204,13 +317,19 @@ run_benchmark() {
     
     # Run latencies
     for lat in "${LAT_ARRAY[@]}"; do
-        local outdir val_opts
+        local outdir val_opts trace_opts
         [[ "$lat" -eq 0 ]] && outdir="${BASE_OUTDIR}/${bench}/baseline_no_validation" && val_opts="" \
                            || outdir="${BASE_OUTDIR}/${bench}/latency_${lat}" && val_opts="--enable-kernel-validation --kernel-validation-latency=$lat"
         
+        # Set up trace options if enabled
+        trace_opts=""
+        if $ENABLE_TRACE; then
+            trace_opts="--debug-flags=${TRACE_FLAGS} --debug-file=trace.log"
+        fi
+        
         echo "[${bench}] Running lat=$lat..."
         
-        "${M5_PATH}/build/ARM/gem5.opt" --outdir="$outdir" \
+        "${M5_PATH}/build/ARM/gem5.opt" --outdir="$outdir" $trace_opts \
             "${M5_PATH}/configs/SALAM/fs_${bench}.py" \
             --mem-size=4GB --mem-type=DDR4_2400_8x8 \
             --kernel="${M5_PATH}/${path}/sw/main.elf" \
@@ -222,6 +341,7 @@ run_benchmark() {
             > "$outdir/run.log" 2>&1
         
         [[ -f "$outdir/stats.txt" ]] && echo "[${bench}] ✓ lat=$lat" || echo "[${bench}] ✗ lat=$lat FAILED"
+        $ENABLE_TRACE && [[ -f "$outdir/trace.log" ]] && echo "[${bench}]   Trace: $outdir/trace.log"
     done
 }
 

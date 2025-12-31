@@ -18,6 +18,8 @@ LLVMInterface::LLVMInterface(const LLVMInterfaceParams &p):
     totalKernelValidationLatency(0),
     kernelValidationDenied(0),
     validationCacheHits(0),
+    validationCoalescedWaits(0),
+    totalCoalescedWaitLatency(0),
     validationResponseEvent(
         [this]{ processValidationResponse(); }, name())
 {
@@ -1223,6 +1225,7 @@ LLVMInterface::queueWaitingInstruction(uint64_t addr,
     waiting.isRead = isRead;
     waiting.addr = addr;
     waiting.size = size;
+    waiting.queueTime = curTick();  // Record when this instruction started waiting
     waitingForPage[pageAddr].push_back(waiting);
     pendingValidationUIDs.insert(inst->getUID());
 }
@@ -1333,15 +1336,28 @@ LLVMInterface::processValidationResponse()
 
         if (validationOK) {
             // Proceed with the original request
+            // Check RAW hazard before launching read
             if (req.isRead) {
-                auto memReq = req.inst->createMemoryRequest();
-                auto rd_uid = req.inst->getUID();
-                req.func->readQueue.insert({rd_uid, req.inst});
-                req.func->readQueueMap.insert({memReq, rd_uid});
-                launchRead(memReq, req.func);
-                DPRINTF(LLVMInterface,
-                        "[AIA] Proceeding with READ at 0x%016lx\n",
-                        req.addr);
+                uint64_t readAddr = req.inst->getPtrOperandValue(0);
+                if (req.func->writeActive(readAddr)) {
+                    // RAW hazard detected - re-add dependency and put back in reservation
+                    auto activeWrite = req.func->getActiveWrite(readAddr);
+                    req.inst->addRuntimeDependency(activeWrite);
+                    activeWrite->addRuntimeUser(req.inst);
+                    req.func->addToReservation(req.inst);
+                    DPRINTF(LLVMInterface,
+                            "[AIA] RAW hazard for READ at 0x%016lx - "
+                            "re-queuing to reservation\n", req.addr);
+                } else {
+                    auto memReq = req.inst->createMemoryRequest();
+                    auto rd_uid = req.inst->getUID();
+                    req.func->readQueue.insert({rd_uid, req.inst});
+                    req.func->readQueueMap.insert({memReq, rd_uid});
+                    launchRead(memReq, req.func);
+                    DPRINTF(LLVMInterface,
+                            "[AIA] Proceeding with READ at 0x%016lx\n",
+                            req.addr);
+                }
             } else {
                 auto memReq = req.inst->createMemoryRequest();
                 req.func->trackWrite(memReq->getAddress(), req.inst);
@@ -1360,19 +1376,37 @@ LLVMInterface::processValidationResponse()
                 for (auto& waiting : waitIt->second) {
                     pendingValidationUIDs.erase(waiting.inst->getUID());
                     waiting.func->removeFromReservation(waiting.inst->getUID());
-                    validationCacheHits++;  // Count as cache hit (shared)
+                    
+                    // Track coalesced wait statistics (NOT a cache hit - it waited)
+                    validationCoalescedWaits++;
+                    Tick waitLatency = currentTick - waiting.queueTime;
+                    totalCoalescedWaitLatency += waitLatency;
 
                     DPRINTF(LLVMInterface,
-                            "[AIA] Processing waiting %s at 0x%016lx\n",
+                            "[AIA] Processing waiting %s at 0x%016lx "
+                            "(waited %llu ticks)\n",
                             waiting.isRead ? "READ" : "WRITE",
-                            waiting.addr);
+                            waiting.addr, waitLatency);
 
                     if (waiting.isRead) {
-                        auto memReq = waiting.inst->createMemoryRequest();
-                        auto rd_uid = waiting.inst->getUID();
-                        waiting.func->readQueue.insert({rd_uid, waiting.inst});
-                        waiting.func->readQueueMap.insert({memReq, rd_uid});
-                        launchRead(memReq, waiting.func);
+                        // Check RAW hazard before launching read
+                        uint64_t readAddr = waiting.inst->getPtrOperandValue(0);
+                        if (waiting.func->writeActive(readAddr)) {
+                            // RAW hazard - re-add to reservation with dependency
+                            auto activeWrite = waiting.func->getActiveWrite(readAddr);
+                            waiting.inst->addRuntimeDependency(activeWrite);
+                            activeWrite->addRuntimeUser(waiting.inst);
+                            waiting.func->addToReservation(waiting.inst);
+                            DPRINTF(LLVMInterface,
+                                    "[AIA] RAW hazard for waiting READ at "
+                                    "0x%016lx - re-queuing\n", waiting.addr);
+                        } else {
+                            auto memReq = waiting.inst->createMemoryRequest();
+                            auto rd_uid = waiting.inst->getUID();
+                            waiting.func->readQueue.insert({rd_uid, waiting.inst});
+                            waiting.func->readQueueMap.insert({memReq, rd_uid});
+                            launchRead(memReq, waiting.func);
+                        }
                     } else {
                         auto memReq = waiting.inst->createMemoryRequest();
                         waiting.func->trackWrite(
@@ -1422,32 +1456,53 @@ LLVMInterface::printKernelValidationStats()
               << std::endl;
     std::cout << "   Kernel validation enabled:       "
               << (enableKernelValidation ? "YES" : "NO") << std::endl;
-    std::cout << "   Total validation requests:       "
-              << totalKernelValidations << std::endl;
-    std::cout << "   Validations denied:              "
-              << kernelValidationDenied << std::endl;
-    std::cout << "   Total validation latency:        "
-              << totalValidationTime << " us" << std::endl;
-    std::cout << "   Average validation latency:      "
-              << avgValidationTime << " us" << std::endl;
     std::cout << "   Configured latency per check:    "
               << (double)(kernelValidationLatency) * (1e-6)
               << " us" << std::endl;
-    std::cout << "   Validation cache hits:           "
-              << validationCacheHits << std::endl;
+    std::cout << std::endl;
+    
+    // Access breakdown
+    uint64_t totalMemAccesses = totalKernelValidations + validationCacheHits + validationCoalescedWaits;
+    std::cout << "   --- Access Breakdown ---" << std::endl;
+    std::cout << "   Total memory accesses (validated): " << totalMemAccesses << std::endl;
+    std::cout << "   Cache hits (0 latency):          " << validationCacheHits << std::endl;
+    std::cout << "   Validation requests (full lat):  " << totalKernelValidations << std::endl;
+    std::cout << "   Coalesced waits (partial lat):   " << validationCoalescedWaits << std::endl;
+    std::cout << "   Validations denied:              " << kernelValidationDenied << std::endl;
+    std::cout << std::endl;
+    
+    // Latency breakdown
+    double coalescedWaitTimeUs = (double)(totalCoalescedWaitLatency) * (1e-6);
+    double totalSecurityOverheadUs = totalValidationTime + coalescedWaitTimeUs;
+    double avgValidationLatUs = totalKernelValidations > 0 ?
+        totalValidationTime / totalKernelValidations : 0.0;
+    double avgCoalescedLatUs = validationCoalescedWaits > 0 ?
+        coalescedWaitTimeUs / validationCoalescedWaits : 0.0;
+    uint64_t accessesWithLatency = totalKernelValidations + validationCoalescedWaits;
+    double avgOverheadPerAccess = accessesWithLatency > 0 ?
+        totalSecurityOverheadUs / accessesWithLatency : 0.0;
+    
+    std::cout << "   --- Latency Breakdown ---" << std::endl;
+    std::cout << "   Validation request latency:      " << totalValidationTime << " us" << std::endl;
+    std::cout << "   Coalesced wait latency:          " << coalescedWaitTimeUs << " us" << std::endl;
+    std::cout << "   TOTAL SECURITY OVERHEAD:         " << totalSecurityOverheadUs << " us" << std::endl;
+    std::cout << "   Avg latency per validation:      " << avgValidationLatUs << " us" << std::endl;
+    std::cout << "   Avg latency per coalesced wait:  " << avgCoalescedLatUs << " us" << std::endl;
+    std::cout << "   Avg overhead per blocked access: " << avgOverheadPerAccess << " us" << std::endl;
+    std::cout << std::endl;
+
+    // Cache statistics
     // Count total unique pages across all processes
     size_t totalUniquePages = 0;
     for (const auto& procCache : validatedPagesPerProcess) {
         totalUniquePages += procCache.second.size();
     }
-    std::cout << "   Processes with cached pages:     "
-              << validatedPagesPerProcess.size() << std::endl;
-    std::cout << "   Unique pages validated (total):  "
-              << totalUniquePages << std::endl;
-    uint64_t totalAccesses = totalKernelValidations + validationCacheHits;
-    std::cout << "   Cache hit rate:                  "
-              << (totalAccesses > 0 ?
-                  (100.0 * validationCacheHits / totalAccesses) : 0.0)
-              << "%" << std::endl;
+    double cacheHitRate = totalMemAccesses > 0 ?
+        (100.0 * validationCacheHits / totalMemAccesses) : 0.0;
+    
+    std::cout << "   --- Cache Statistics ---" << std::endl;
+    std::cout << "   Processes with cached pages:     " << validatedPagesPerProcess.size() << std::endl;
+    std::cout << "   Unique pages validated (total):  " << totalUniquePages << std::endl;
+    std::cout << "   Cache hit rate:                  " << cacheHitRate << "%" << std::endl;
     std::cout << std::endl;
 }
